@@ -122,18 +122,6 @@ def decode_barcodes(pil_image):
     if has_required_barcodes(barcodes_found):
         return barcodes_found
     
-    # Try 8: Brightness/contrast adjustments (only if nothing found)
-    if len(barcodes_found) == 0:
-        from PIL import ImageEnhance
-        for factor in [1.5, 2.0, 2.5, 3.0, 0.5, 0.7, 0.85, 1.3]:
-            enhanced_img = ImageEnhance.Contrast(pil_image).enhance(factor)
-            for barcode in decode(enhanced_img, symbols=[ZBarSymbol.CODE128]):
-                data = barcode.data.decode('utf-8')
-                if data not in barcodes_found:
-                    barcodes_found.append(data)
-            if has_required_barcodes(barcodes_found):
-                return barcodes_found
-    
     return barcodes_found
 
 
