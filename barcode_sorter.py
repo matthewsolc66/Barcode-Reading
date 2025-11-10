@@ -338,13 +338,23 @@ def extract_text_with_ocr(pil_image):
                     )
                     
                     # Look for part numbers: ####-##### (without P prefix in text)
+                    # Filter to only accept part numbers starting with 0042-
                     part_matches = re.findall(r'\d{4}-?\d{5}', text)
                     for match in part_matches:
                         # Normalize (ensure hyphen is present and add P prefix)
                         if '-' in match:
-                            normalized = f"P{match}"
+                            # Check if starts with 0042-
+                            if match.startswith('0042-'):
+                                normalized = f"P{match}"
+                            else:
+                                continue  # Skip non-0042 part numbers
                         else:
-                            normalized = f"P{match[:4]}-{match[4:]}"
+                            # Add hyphen in correct position
+                            if match.startswith('0042'):
+                                normalized = f"P{match[:4]}-{match[4:]}"
+                            else:
+                                continue  # Skip non-0042 part numbers
+                        
                         if normalized not in found_codes and re.fullmatch(r'^P\d{4}-\d{5}$', normalized):
                             found_codes.append(normalized)
                     
@@ -578,18 +588,118 @@ def main():
     print(f"\n[INFO] Found {len(image_files)} image(s) to process")
     print("=" * 80)
     
-    # Process all images
-    results = []
+    # PASS 1: Process all images and collect data
+    print("\n[INFO] Pass 1: Scanning all images for barcodes...")
+    all_results = []
     for image_path in image_files:
-        result = process_image(image_path, output_folder)
-        results.append(result)
+        result = process_image_scan_only(image_path)
+        all_results.append(result)
+    
+    # Build a mapping of serial numbers to part numbers
+    serial_to_part = {}
+    for result in all_results:
+        if result['part_number'] and result['serial_number']:
+            serial_to_part[result['serial_number']] = result['part_number']
+    
+    # PASS 2: Apply smart matching and copy files
+    print("\n[INFO] Pass 2: Organizing images...")
+    final_results = []
+    for result in all_results:
+        image_path = result['image_path']
+        part_number = result['part_number']
+        serial_number = result['serial_number']
+        
+        # If we have serial but no part, try to find it from other images
+        if serial_number and not part_number:
+            if serial_number in serial_to_part:
+                part_number = serial_to_part[serial_number]
+                print(f"\n[INFO] Matched {os.path.basename(image_path)}")
+                print(f"  Serial {serial_number} matched to part {part_number} from other images")
+        
+        # Now copy the file
+        target_folder = create_folder_structure(output_folder, part_number, serial_number)
+        target_path = os.path.join(target_folder, os.path.basename(image_path))
+        
+        try:
+            shutil.copy2(image_path, target_path)
+            print(f"\n[INFO] Processing: {os.path.basename(image_path)}")
+            if result['all_barcodes']:
+                print(f"  Found {len(result['all_barcodes'])} barcode(s): {result['all_barcodes']}")
+            else:
+                print(f"  No barcodes found")
+            print(f"  Part Number: {part_number if part_number else 'Not found'}")
+            print(f"  Serial Number: {serial_number if serial_number else 'Not found'}")
+            print(f"  Copied to: {target_path}")
+            
+            final_results.append({
+                'filename': os.path.basename(image_path),
+                'part_number': part_number,
+                'serial_number': serial_number,
+                'all_barcodes': result['all_barcodes'],
+                'target_folder': target_folder,
+                'success': True
+            })
+        except Exception as e:
+            print(f"  [ERROR] Failed to copy: {e}")
+            final_results.append({
+                'filename': os.path.basename(image_path),
+                'part_number': part_number,
+                'serial_number': serial_number,
+                'all_barcodes': result['all_barcodes'],
+                'target_folder': None,
+                'success': False,
+                'error': str(e)
+            })
     
     # Generate report
     print("\n" + "=" * 80)
-    generate_report(results, output_folder)
+    generate_report(final_results, output_folder)
     
     print("\n[INFO] Processing complete!")
     print(f"[INFO] Images organized in: {output_folder}")
+
+
+def process_image_scan_only(image_path):
+    """
+    Scan image for barcodes but don't copy it yet.
+    Returns dict with image_path, part_number, serial_number, all_barcodes.
+    """
+    try:
+        pil_image = Image.open(image_path)
+        pil_image = apply_exif_orientation(pil_image)
+        
+        # Decode all barcodes
+        barcodes = decode_barcodes(pil_image)
+        
+        # If no barcodes found or missing required ones, try OCR fallback
+        if not has_required_barcodes(barcodes):
+            ocr_codes = extract_text_with_ocr(pil_image)
+            if ocr_codes:
+                # Merge with existing barcodes
+                for code in ocr_codes:
+                    if code not in barcodes:
+                        barcodes.append(code)
+        
+        # Extract identifiers
+        part_number, serial_number = extract_identifiers(barcodes)
+        
+        return {
+            'image_path': image_path,
+            'part_number': part_number,
+            'serial_number': serial_number,
+            'all_barcodes': barcodes,
+            'success': True
+        }
+        
+    except Exception as e:
+        return {
+            'image_path': image_path,
+            'part_number': None,
+            'serial_number': None,
+            'all_barcodes': [],
+            'success': False,
+            'error': str(e)
+        }
 
 
 if __name__ == "__main__":
