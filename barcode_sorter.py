@@ -9,8 +9,9 @@ import os
 import re
 import shutil
 import warnings
+import subprocess
 from pathlib import Path
-from tkinter import Tk, filedialog
+from tkinter import Tk, filedialog, simpledialog, messagebox
 from PIL import Image, ImageOps
 from pyzbar.pyzbar import decode, ZBarSymbol
 import cv2
@@ -122,34 +123,7 @@ def decode_barcodes(pil_image):
     if has_required_barcodes(barcodes_found):
         return barcodes_found
     
-    # Try 4: Multiple scales (resize image to look for small barcodes)
-    for scale in [1.5, 2.0, 2.5]:
-        new_w = int(pil_image.width * scale)
-        new_h = int(pil_image.height * scale)
-        scaled = pil_image.resize((new_w, new_h), Image.Resampling.LANCZOS)
-        results = decode(scaled, symbols=[ZBarSymbol.CODE128])
-        for barcode in results:
-            data = barcode.data.decode('utf-8')
-            if data not in barcodes_found:
-                barcodes_found.append(data)
-        
-        if has_required_barcodes(barcodes_found):
-            return barcodes_found
-        
-        # Also try enhanced version at this scale
-        scaled_array = np.array(scaled)
-        scaled_enhanced = enhance_for_barcode_reading(scaled_array)
-        scaled_enhanced_pil = Image.fromarray(scaled_enhanced)
-        results = decode(scaled_enhanced_pil, symbols=[ZBarSymbol.CODE128])
-        for barcode in results:
-            data = barcode.data.decode('utf-8')
-            if data not in barcodes_found:
-                barcodes_found.append(data)
-        
-        if has_required_barcodes(barcodes_found):
-            return barcodes_found
-    
-    # Try 5: Binary thresholding (Otsu's method)
+    # Try 4: Binary thresholding (Otsu's method)
     _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     binary_pil = Image.fromarray(binary)
     results = decode(binary_pil, symbols=[ZBarSymbol.CODE128])
@@ -161,7 +135,7 @@ def decode_barcodes(pil_image):
     if has_required_barcodes(barcodes_found):
         return barcodes_found
     
-    # Try 6: Adaptive thresholding with multiple block sizes
+    # Try 5: Adaptive thresholding with multiple block sizes
     for block_size in [11, 21, 51]:
         adaptive = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
                                          cv2.THRESH_BINARY, block_size, 10)
@@ -175,7 +149,7 @@ def decode_barcodes(pil_image):
         if has_required_barcodes(barcodes_found):
             return barcodes_found
     
-    # Try 7: Inverted binary (white text on black background)
+    # Try 6: Inverted binary (white text on black background)
     inverted = cv2.bitwise_not(binary)
     inverted_pil = Image.fromarray(inverted)
     results = decode(inverted_pil, symbols=[ZBarSymbol.CODE128])
@@ -187,7 +161,7 @@ def decode_barcodes(pil_image):
     if has_required_barcodes(barcodes_found):
         return barcodes_found
     
-    # Try 8: Morphological operations to clean up noise
+    # Try 7: Morphological operations to clean up noise
     kernel = np.ones((2,2), np.uint8)
     morph = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
     morph_pil = Image.fromarray(morph)
@@ -200,34 +174,7 @@ def decode_barcodes(pil_image):
     if has_required_barcodes(barcodes_found):
         return barcodes_found
     
-    # Try 9: Multiple rotations (only if still nothing found)
-    if len(barcodes_found) == 0:
-        for angle in [90, 180, 270]:
-            rotated = pil_image.rotate(angle, expand=True)
-            results = decode(rotated, symbols=[ZBarSymbol.CODE128])
-            for barcode in results:
-                data = barcode.data.decode('utf-8')
-                if data not in barcodes_found:
-                    barcodes_found.append(data)
-            
-            if has_required_barcodes(barcodes_found):
-                return barcodes_found
-            
-            # Try rotated + scaled
-            for scale in [1.5, 2.0]:
-                new_w = int(rotated.width * scale)
-                new_h = int(rotated.height * scale)
-                scaled_rot = rotated.resize((new_w, new_h), Image.Resampling.LANCZOS)
-                results = decode(scaled_rot, symbols=[ZBarSymbol.CODE128])
-                for barcode in results:
-                    data = barcode.data.decode('utf-8')
-                    if data not in barcodes_found:
-                        barcodes_found.append(data)
-                
-                if has_required_barcodes(barcodes_found):
-                    return barcodes_found
-    
-    # Try 10: Brightness/contrast adjustments (only if still nothing found)
+    # Try 9: Brightness/contrast adjustments (only if still nothing found)
     if len(barcodes_found) == 0:
         from PIL import ImageEnhance
         
@@ -284,10 +231,14 @@ def decode_barcodes(pil_image):
     return barcodes_found
 
 
-def extract_text_with_ocr(pil_image):
+def extract_text_with_ocr(pil_image, expected_part_number=None):
     """
     Use OCR to extract text from image and look for part/serial numbers.
     Returns list of found identifiers.
+    
+    Args:
+        pil_image: PIL Image object to process
+        expected_part_number: Optional string - can be full part number like "0042-68152" or just prefix like "0042"
     """
     if not TESSERACT_AVAILABLE:
         return []
@@ -323,6 +274,10 @@ def extract_text_with_ocr(pil_image):
         scaled = cv2.resize(enhanced, (w*2, h*2), interpolation=cv2.INTER_CUBIC)
         preprocessed_images.append(scaled)
         
+        # Determine if we're matching exact part number or prefix
+        match_exact = expected_part_number and '-' in expected_part_number
+        match_prefix = expected_part_number and '-' not in expected_part_number
+        
         # Run OCR on each preprocessed version
         for img in preprocessed_images:
             pil_img = Image.fromarray(img)
@@ -338,22 +293,30 @@ def extract_text_with_ocr(pil_image):
                     )
                     
                     # Look for part numbers: ####-##### (without P prefix in text)
-                    # Filter to only accept part numbers starting with 0042-
                     part_matches = re.findall(r'\d{4}-?\d{5}', text)
                     for match in part_matches:
-                        # Normalize (ensure hyphen is present and add P prefix)
+                        # Normalize (ensure hyphen is present)
                         if '-' in match:
-                            # Check if starts with 0042-
-                            if match.startswith('0042-'):
-                                normalized = f"P{match}"
-                            else:
-                                continue  # Skip non-0042 part numbers
+                            normalized_base = match
                         else:
-                            # Add hyphen in correct position
-                            if match.startswith('0042'):
-                                normalized = f"P{match[:4]}-{match[4:]}"
+                            normalized_base = f"{match[:4]}-{match[4:]}"
+                        
+                        # Apply filter if specified
+                        if match_exact:
+                            # Exact match required
+                            if normalized_base == expected_part_number:
+                                normalized = f"P{normalized_base}"
                             else:
-                                continue  # Skip non-0042 part numbers
+                                continue
+                        elif match_prefix:
+                            # Prefix match required
+                            if normalized_base.startswith(expected_part_number + '-'):
+                                normalized = f"P{normalized_base}"
+                            else:
+                                continue
+                        else:
+                            # No filter
+                            normalized = f"P{normalized_base}"
                         
                         if normalized not in found_codes and re.fullmatch(r'^P\d{4}-\d{5}$', normalized):
                             found_codes.append(normalized)
@@ -568,6 +531,51 @@ def main():
     
     print(f"\n[INFO] Input folder: {input_folder}")
     
+    # Ask for expected part number using GUI dialog
+    root = Tk()
+    root.withdraw()
+    
+    expected_part_number = simpledialog.askstring(
+        "Part Number Filter",
+        "Enter the expected part number to filter OCR results.\n\n"
+        "Format: ####-##### (e.g., '0042-68152')\n"
+        "Or just prefix: #### (e.g., '0042')\n\n"
+        "Press OK without entering anything to use default (0042 prefix)",
+        initialvalue=""
+    )
+    
+    # Handle dialog cancellation
+    if expected_part_number is None:
+        print("[INFO] Part number input cancelled. Exiting.")
+        return
+    
+    # Handle empty input (default)
+    expected_part_number = expected_part_number.strip()
+    if not expected_part_number:
+        expected_part_number = "0042"
+        print("[INFO] Using default: Will accept any part number starting with 0042-")
+    else:
+        # Remove P prefix if user included it
+        if expected_part_number.startswith('P'):
+            expected_part_number = expected_part_number[1:]
+        
+        # Check if it's a full part number or just prefix
+        if re.fullmatch(r'\d{4}-\d{5}', expected_part_number):
+            # Full part number
+            print(f"[INFO] Will filter for exact part number: {expected_part_number}")
+        elif re.fullmatch(r'\d{4}', expected_part_number):
+            # Just the prefix
+            print(f"[INFO] Will filter for part numbers starting with: {expected_part_number}-")
+        else:
+            messagebox.showwarning(
+                "Invalid Format",
+                f"Invalid format: '{expected_part_number}'\n\n"
+                "Expected ####-##### or ####\n"
+                "Using default 0042 prefix instead."
+            )
+            expected_part_number = "0042"
+            print("[INFO] Will accept any part number starting with 0042-")
+    
     # Create output folder automatically in the input directory
     output_folder = os.path.join(input_folder, "Sorted_Images")
     os.makedirs(output_folder, exist_ok=True)
@@ -588,12 +596,73 @@ def main():
     print(f"\n[INFO] Found {len(image_files)} image(s) to process")
     print("=" * 80)
     
-    # PASS 1: Process all images and collect data
-    print("\n[INFO] Pass 1: Scanning all images for barcodes...")
+    # PASS 1: Quick barcode scan only (no OCR yet)
+    print("\n[INFO] Pass 1: Quick barcode scanning...")
+    print("=" * 80)
     all_results = []
-    for image_path in image_files:
-        result = process_image_scan_only(image_path)
+    for idx, image_path in enumerate(image_files, 1):
+        print(f"[{idx}/{len(image_files)}] Scanning: {os.path.basename(image_path)}", end=" ")
+        result = process_image_barcode_only(image_path)
         all_results.append(result)
+        
+        # Show quick summary
+        if result['success']:
+            if result['part_number'] and result['serial_number']:
+                print(f"✓ Part & Serial")
+            elif result['part_number']:
+                print(f"✓ Part only")
+            elif result['serial_number']:
+                print(f"✓ Serial only")
+            elif result['all_barcodes']:
+                print(f"⚠ {len(result['all_barcodes'])} barcode(s), no P/S")
+            else:
+                print(f"⚠ No barcodes")
+        else:
+            print(f"✗ Error")
+    
+    print("=" * 80)
+    
+    # PASS 2: OCR fallback for images missing part/serial
+    images_needing_ocr = [r for r in all_results if not has_required_barcodes(r['all_barcodes'])]
+    
+    if images_needing_ocr:
+        print(f"\n[INFO] Pass 2: OCR fallback for {len(images_needing_ocr)} images...")
+        print("=" * 80)
+        
+        for idx, result in enumerate(images_needing_ocr, 1):
+            image_path = result['image_path']
+            print(f"\n[{idx}/{len(images_needing_ocr)}] OCR: {os.path.basename(image_path)}")
+            print("-" * 80)
+            print("  → Running OCR (this may take a moment)...")
+            
+            try:
+                pil_image = Image.open(image_path)
+                pil_image = apply_exif_orientation(pil_image)
+                ocr_codes = extract_text_with_ocr(pil_image, expected_part_number)
+                
+                if ocr_codes:
+                    print(f"  → OCR found: {ocr_codes}")
+                    # Merge with existing barcodes
+                    for code in ocr_codes:
+                        if code not in result['all_barcodes']:
+                            result['all_barcodes'].append(code)
+                    
+                    # Re-extract identifiers with OCR results
+                    result['part_number'], result['serial_number'] = extract_identifiers(result['all_barcodes'])
+                    
+                    if result['part_number'] or result['serial_number']:
+                        print(f"  ✓ Now have: Part={result['part_number'] or 'None'} | Serial={result['serial_number'][-8:] if result['serial_number'] else 'None'}")
+                    else:
+                        print(f"  ⚠ OCR found codes but no valid P/S")
+                else:
+                    print(f"  ⚠ OCR found nothing")
+            except Exception as e:
+                print(f"  ✗ OCR failed: {e}")
+        
+        print("\n" + "=" * 80)
+    else:
+        print("\n[INFO] Pass 2: Skipped (all images have barcodes)")
+    
     
     # Build a mapping of serial numbers to part numbers
     serial_to_part = {}
@@ -601,20 +670,22 @@ def main():
         if result['part_number'] and result['serial_number']:
             serial_to_part[result['serial_number']] = result['part_number']
     
-    # PASS 2: Apply smart matching and copy files
-    print("\n[INFO] Pass 2: Organizing images...")
+    # PASS 3: Apply smart matching and copy files
+    print("\n[INFO] Pass 3: Organizing and copying images...")
+    print("=" * 80)
     final_results = []
-    for result in all_results:
+    for idx, result in enumerate(all_results, 1):
         image_path = result['image_path']
         part_number = result['part_number']
         serial_number = result['serial_number']
+        
+        print(f"\n[{idx}/{len(all_results)}] Organizing: {os.path.basename(image_path)}")
         
         # If we have serial but no part, try to find it from other images
         if serial_number and not part_number:
             if serial_number in serial_to_part:
                 part_number = serial_to_part[serial_number]
-                print(f"\n[INFO] Matched {os.path.basename(image_path)}")
-                print(f"  Serial {serial_number} matched to part {part_number} from other images")
+                print(f"  → Matched serial {serial_number[-8:]} to part {part_number}")
         
         # Now copy the file
         target_folder = create_folder_structure(output_folder, part_number, serial_number)
@@ -622,14 +693,7 @@ def main():
         
         try:
             shutil.copy2(image_path, target_path)
-            print(f"\n[INFO] Processing: {os.path.basename(image_path)}")
-            if result['all_barcodes']:
-                print(f"  Found {len(result['all_barcodes'])} barcode(s): {result['all_barcodes']}")
-            else:
-                print(f"  No barcodes found")
-            print(f"  Part Number: {part_number if part_number else 'Not found'}")
-            print(f"  Serial Number: {serial_number if serial_number else 'Not found'}")
-            print(f"  Copied to: {target_path}")
+            print(f"  ✓ Copied to: {os.path.relpath(target_folder, output_folder)}/")
             
             final_results.append({
                 'filename': os.path.basename(image_path),
@@ -640,7 +704,7 @@ def main():
                 'success': True
             })
         except Exception as e:
-            print(f"  [ERROR] Failed to copy: {e}")
+            print(f"  ✗ Error copying: {e}")
             final_results.append({
                 'filename': os.path.basename(image_path),
                 'part_number': part_number,
@@ -657,24 +721,85 @@ def main():
     
     print("\n[INFO] Processing complete!")
     print(f"[INFO] Images organized in: {output_folder}")
+    
+    # Open the output folder in File Explorer
+    try:
+        os.startfile(output_folder)
+    except Exception as e:
+        print(f"[WARN] Could not open output folder: {e}")
+    
+    # Show completion dialog
+    messagebox.showinfo(
+        "Processing Complete",
+        f"Successfully processed {len(final_results)} images!\n\n"
+        f"Results saved to:\n{output_folder}\n\n"
+        f"Check '_sorting_report.txt' for details."
+    )
 
 
-def process_image_scan_only(image_path):
+def process_image_barcode_only(image_path):
     """
-    Scan image for barcodes but don't copy it yet.
+    Quick barcode scan only - no OCR fallback.
     Returns dict with image_path, part_number, serial_number, all_barcodes.
+    
+    Args:
+        image_path: Path to the image file
     """
     try:
         pil_image = Image.open(image_path)
         pil_image = apply_exif_orientation(pil_image)
         
+        # Decode all barcodes (no OCR)
+        barcodes = decode_barcodes(pil_image)
+        
+        # Extract identifiers
+        part_number, serial_number = extract_identifiers(barcodes)
+        
+        return {
+            'image_path': image_path,
+            'part_number': part_number,
+            'serial_number': serial_number,
+            'all_barcodes': barcodes,
+            'success': True
+        }
+        
+    except Exception as e:
+        return {
+            'image_path': image_path,
+            'part_number': None,
+            'serial_number': None,
+            'all_barcodes': [],
+            'success': False,
+            'error': str(e)
+        }
+
+
+def process_image_scan_only(image_path, expected_part_number=None, current_num=None, total_num=None):
+    """
+    Scan image for barcodes but don't copy it yet.
+    Returns dict with image_path, part_number, serial_number, all_barcodes.
+    
+    Args:
+        image_path: Path to the image file
+        expected_part_number: Optional string like "0042-68152" to filter part numbers
+        current_num: Current image number (for progress display)
+        total_num: Total number of images (for progress display)
+    """
+    try:
+        print("  → Loading image...")
+        pil_image = Image.open(image_path)
+        pil_image = apply_exif_orientation(pil_image)
+        
         # Decode all barcodes
+        print("  → Scanning for barcodes...")
         barcodes = decode_barcodes(pil_image)
         
         # If no barcodes found or missing required ones, try OCR fallback
         if not has_required_barcodes(barcodes):
-            ocr_codes = extract_text_with_ocr(pil_image)
+            print("  → Running OCR fallback (this may take a moment)...")
+            ocr_codes = extract_text_with_ocr(pil_image, expected_part_number)
             if ocr_codes:
+                print(f"  → OCR found: {ocr_codes}")
                 # Merge with existing barcodes
                 for code in ocr_codes:
                     if code not in barcodes:
