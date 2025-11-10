@@ -16,6 +16,15 @@ from pyzbar.pyzbar import decode, ZBarSymbol
 import cv2
 import numpy as np
 
+# Try to import pytesseract for OCR fallback
+try:
+    import pytesseract
+    TESSERACT_AVAILABLE = True
+except ImportError:
+    TESSERACT_AVAILABLE = False
+    print("[WARN] pytesseract not available. Install with: pip install pytesseract")
+    print("[WARN] Also install Tesseract-OCR from: https://github.com/UB-Mannheim/tesseract/wiki")
+
 # Suppress pyzbar warnings
 warnings.filterwarnings('ignore')
 os.environ['PYTHONWARNINGS'] = 'ignore'
@@ -57,6 +66,13 @@ def enhance_for_barcode_reading(image_array):
     return enhanced
 
 
+def has_required_barcodes(barcodes_found):
+    """Check if we have both part number and serial number."""
+    has_part = any(re.fullmatch(r'^P\d{4}-\d{5}$', b) for b in barcodes_found)
+    has_serial = any(re.fullmatch(r'^S\d{18}$', b) for b in barcodes_found)
+    return has_part and has_serial
+
+
 def decode_barcodes(pil_image):
     """
     Decode all Code 128 barcodes from an image using multiple techniques.
@@ -75,6 +91,9 @@ def decode_barcodes(pil_image):
         if data not in barcodes_found:
             barcodes_found.append(data)
     
+    if has_required_barcodes(barcodes_found):
+        return barcodes_found
+    
     # Try 2: Remove glare/reflections before processing
     # Detect bright spots and inpaint them
     _, glare_mask = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY)
@@ -88,6 +107,9 @@ def decode_barcodes(pil_image):
         if data not in barcodes_found:
             barcodes_found.append(data)
     
+    if has_required_barcodes(barcodes_found):
+        return barcodes_found
+    
     # Try 3: Enhanced grayscale with CLAHE
     enhanced = enhance_for_barcode_reading(img_array)
     enhanced_pil = Image.fromarray(enhanced)
@@ -96,6 +118,9 @@ def decode_barcodes(pil_image):
         data = barcode.data.decode('utf-8')
         if data not in barcodes_found:
             barcodes_found.append(data)
+    
+    if has_required_barcodes(barcodes_found):
+        return barcodes_found
     
     # Try 4: Multiple scales (resize image to look for small barcodes)
     for scale in [1.5, 2.0, 2.5]:
@@ -108,6 +133,9 @@ def decode_barcodes(pil_image):
             if data not in barcodes_found:
                 barcodes_found.append(data)
         
+        if has_required_barcodes(barcodes_found):
+            return barcodes_found
+        
         # Also try enhanced version at this scale
         scaled_array = np.array(scaled)
         scaled_enhanced = enhance_for_barcode_reading(scaled_array)
@@ -117,6 +145,9 @@ def decode_barcodes(pil_image):
             data = barcode.data.decode('utf-8')
             if data not in barcodes_found:
                 barcodes_found.append(data)
+        
+        if has_required_barcodes(barcodes_found):
+            return barcodes_found
     
     # Try 5: Binary thresholding (Otsu's method)
     _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
@@ -126,6 +157,9 @@ def decode_barcodes(pil_image):
         data = barcode.data.decode('utf-8')
         if data not in barcodes_found:
             barcodes_found.append(data)
+    
+    if has_required_barcodes(barcodes_found):
+        return barcodes_found
     
     # Try 6: Adaptive thresholding with multiple block sizes
     for block_size in [11, 21, 51]:
@@ -137,6 +171,9 @@ def decode_barcodes(pil_image):
             data = barcode.data.decode('utf-8')
             if data not in barcodes_found:
                 barcodes_found.append(data)
+        
+        if has_required_barcodes(barcodes_found):
+            return barcodes_found
     
     # Try 7: Inverted binary (white text on black background)
     inverted = cv2.bitwise_not(binary)
@@ -146,6 +183,9 @@ def decode_barcodes(pil_image):
         data = barcode.data.decode('utf-8')
         if data not in barcodes_found:
             barcodes_found.append(data)
+    
+    if has_required_barcodes(barcodes_found):
+        return barcodes_found
     
     # Try 8: Morphological operations to clean up noise
     kernel = np.ones((2,2), np.uint8)
@@ -157,6 +197,9 @@ def decode_barcodes(pil_image):
         if data not in barcodes_found:
             barcodes_found.append(data)
     
+    if has_required_barcodes(barcodes_found):
+        return barcodes_found
+    
     # Try 9: Multiple rotations (only if still nothing found)
     if len(barcodes_found) == 0:
         for angle in [90, 180, 270]:
@@ -166,6 +209,9 @@ def decode_barcodes(pil_image):
                 data = barcode.data.decode('utf-8')
                 if data not in barcodes_found:
                     barcodes_found.append(data)
+            
+            if has_required_barcodes(barcodes_found):
+                return barcodes_found
             
             # Try rotated + scaled
             for scale in [1.5, 2.0]:
@@ -177,6 +223,9 @@ def decode_barcodes(pil_image):
                     data = barcode.data.decode('utf-8')
                     if data not in barcodes_found:
                         barcodes_found.append(data)
+                
+                if has_required_barcodes(barcodes_found):
+                    return barcodes_found
     
     # Try 10: Brightness/contrast adjustments (only if still nothing found)
     if len(barcodes_found) == 0:
@@ -191,6 +240,9 @@ def decode_barcodes(pil_image):
                 data = barcode.data.decode('utf-8')
                 if data not in barcodes_found:
                     barcodes_found.append(data)
+            
+            if has_required_barcodes(barcodes_found):
+                return barcodes_found
         
         # Lower contrast (sometimes helps with overexposed images)
         contrast_img = enhancer.enhance(0.5)
@@ -199,6 +251,9 @@ def decode_barcodes(pil_image):
             data = barcode.data.decode('utf-8')
             if data not in barcodes_found:
                 barcodes_found.append(data)
+        
+        if has_required_barcodes(barcodes_found):
+            return barcodes_found
         
         # Brightness adjustments
         enhancer = ImageEnhance.Brightness(pil_image)
@@ -209,6 +264,9 @@ def decode_barcodes(pil_image):
                 data = barcode.data.decode('utf-8')
                 if data not in barcodes_found:
                     barcodes_found.append(data)
+            
+            if has_required_barcodes(barcodes_found):
+                return barcodes_found
         
         # Increase sharpness
         enhancer = ImageEnhance.Sharpness(pil_image)
@@ -219,8 +277,92 @@ def decode_barcodes(pil_image):
                 data = barcode.data.decode('utf-8')
                 if data not in barcodes_found:
                     barcodes_found.append(data)
+            
+            if has_required_barcodes(barcodes_found):
+                return barcodes_found
     
     return barcodes_found
+
+
+def extract_text_with_ocr(pil_image):
+    """
+    Use OCR to extract text from image and look for part/serial numbers.
+    Returns list of found identifiers.
+    """
+    if not TESSERACT_AVAILABLE:
+        return []
+    
+    found_codes = []
+    
+    try:
+        # Convert to grayscale and enhance
+        img_array = np.array(pil_image)
+        gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY) if len(img_array.shape) == 3 else img_array
+        
+        # Apply CLAHE for better text recognition
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
+        
+        # Try multiple preprocessing methods
+        preprocessed_images = []
+        
+        # Original enhanced
+        preprocessed_images.append(enhanced)
+        
+        # Binary threshold
+        _, binary = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        preprocessed_images.append(binary)
+        
+        # Adaptive threshold
+        adaptive = cv2.adaptiveThreshold(enhanced, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                         cv2.THRESH_BINARY, 21, 10)
+        preprocessed_images.append(adaptive)
+        
+        # Upscale for better OCR (2x)
+        h, w = enhanced.shape
+        scaled = cv2.resize(enhanced, (w*2, h*2), interpolation=cv2.INTER_CUBIC)
+        preprocessed_images.append(scaled)
+        
+        # Run OCR on each preprocessed version
+        for img in preprocessed_images:
+            pil_img = Image.fromarray(img)
+            
+            # Use multiple PSM modes (Page Segmentation Modes)
+            # PSM 6 = Assume a single uniform block of text
+            # PSM 11 = Sparse text. Find as much text as possible in no particular order
+            for psm in [6, 11]:
+                try:
+                    text = pytesseract.image_to_string(
+                        pil_img, 
+                        config=f'--psm {psm} -c tessedit_char_whitelist=0123456789-'
+                    )
+                    
+                    # Look for part numbers: ####-##### (without P prefix in text)
+                    part_matches = re.findall(r'\d{4}-?\d{5}', text)
+                    for match in part_matches:
+                        # Normalize (ensure hyphen is present and add P prefix)
+                        if '-' in match:
+                            normalized = f"P{match}"
+                        else:
+                            normalized = f"P{match[:4]}-{match[4:]}"
+                        if normalized not in found_codes and re.fullmatch(r'^P\d{4}-\d{5}$', normalized):
+                            found_codes.append(normalized)
+                    
+                    # Look for serial numbers: ################## (without S prefix in text)
+                    serial_matches = re.findall(r'\d{18}', text)
+                    for match in serial_matches:
+                        # Add S prefix
+                        normalized = f"S{match}"
+                        if normalized not in found_codes:
+                            found_codes.append(normalized)
+                    
+                except Exception as e:
+                    continue
+        
+    except Exception as e:
+        print(f"[WARN] OCR processing failed: {e}")
+    
+    return found_codes
 
 
 def classify_barcode(data):
@@ -301,6 +443,17 @@ def process_image(image_path, output_base_folder):
         
         # Decode all barcodes
         barcodes = decode_barcodes(pil_image)
+        
+        # If no barcodes found or missing required ones, try OCR fallback
+        if not has_required_barcodes(barcodes):
+            print(f"  Trying OCR fallback...")
+            ocr_codes = extract_text_with_ocr(pil_image)
+            if ocr_codes:
+                print(f"  OCR found: {ocr_codes}")
+                # Merge with existing barcodes
+                for code in ocr_codes:
+                    if code not in barcodes:
+                        barcodes.append(code)
         
         if barcodes:
             print(f"  Found {len(barcodes)} barcode(s): {barcodes}")
