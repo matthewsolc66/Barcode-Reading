@@ -17,7 +17,7 @@ import signal
 import sys
 from datetime import datetime
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from tkinter import Tk, filedialog, simpledialog, messagebox
+from tkinter import Tk, filedialog, simpledialog, messagebox, Toplevel, Checkbutton, IntVar, Button, Label, Frame
 from PIL import Image, ImageOps
 from pyzbar.pyzbar import decode, ZBarSymbol
 import cv2
@@ -33,6 +33,81 @@ except ImportError:
 # Suppress warnings
 warnings.filterwarnings('ignore')
 os.environ['PYTHONWARNINGS'] = 'ignore'
+
+
+def select_part_numbers_dialog(part_numbers):
+    """Show GUI dialog with checkboxes to select which part numbers to process."""
+    if not part_numbers:
+        return None
+    
+    selected_parts = []
+    
+    # Create dialog window
+    dialog = Toplevel()
+    dialog.title("Select Part Numbers")
+    dialog.geometry("400x400")
+    dialog.resizable(False, False)
+    
+    # Center the window
+    dialog.update_idletasks()
+    width = dialog.winfo_width()
+    height = dialog.winfo_height()
+    x = (dialog.winfo_screenwidth() // 2) - (width // 2)
+    y = (dialog.winfo_screenheight() // 2) - (height // 2)
+    dialog.geometry(f'{width}x{height}+{x}+{y}')
+    
+    # Title label
+    title_label = Label(dialog, text="Select which part numbers to process:", 
+                       font=("Arial", 11, "bold"), pady=10)
+    title_label.pack()
+    
+    # Frame for checkboxes with scrollbar if needed
+    checkbox_frame = Frame(dialog)
+    checkbox_frame.pack(pady=10, padx=20, fill="both", expand=True)
+    
+    # Create checkboxes
+    checkbox_vars = []
+    for part in part_numbers:
+        var = IntVar(value=1)  # 1 = checked by default
+        cb = Checkbutton(checkbox_frame, text=f"P{part}", variable=var, 
+                        font=("Arial", 10), anchor="w")
+        cb.pack(fill="x", pady=2)
+        checkbox_vars.append((part, var))
+    
+    # Button frame
+    button_frame = Frame(dialog)
+    button_frame.pack(pady=15)
+    
+    def on_ok():
+        nonlocal selected_parts
+        selected_parts = [part for part, var in checkbox_vars if var.get() == 1]
+        dialog.destroy()
+    
+    def on_cancel():
+        nonlocal selected_parts
+        selected_parts = None
+        dialog.destroy()
+    
+    def select_all():
+        for _, var in checkbox_vars:
+            var.set(1)
+    
+    def deselect_all():
+        for _, var in checkbox_vars:
+            var.set(0)
+    
+    # Buttons
+    Button(button_frame, text="Select All", command=select_all, width=12).pack(side="left", padx=5)
+    Button(button_frame, text="Deselect All", command=deselect_all, width=12).pack(side="left", padx=5)
+    Button(button_frame, text="OK", command=on_ok, width=12, bg="#4CAF50", fg="white").pack(side="left", padx=5)
+    Button(button_frame, text="Cancel", command=on_cancel, width=12).pack(side="left", padx=5)
+    
+    # Make dialog modal
+    dialog.transient()
+    dialog.grab_set()
+    dialog.wait_window()
+    
+    return selected_parts
 
 
 def load_expected_part_numbers(config_file='part_numbers_config.txt'):
@@ -537,11 +612,29 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
     
     # Load expected part numbers from config file
-    expected_part_numbers = load_expected_part_numbers()
+    all_expected_parts = load_expected_part_numbers()
     
     # Select input folder
     root = Tk()
     root.withdraw()
+    
+    # If we have expected parts, show selection dialog
+    if all_expected_parts:
+        expected_part_numbers = select_part_numbers_dialog(all_expected_parts)
+        if expected_part_numbers is None:
+            print("[INFO] Cancelled. Exiting.")
+            return
+        if not expected_part_numbers:
+            messagebox.showwarning("No Selection", "No part numbers selected. Exiting.")
+            print("[INFO] No part numbers selected. Exiting.")
+            return
+        print(f"\n[INFO] Selected {len(expected_part_numbers)} part numbers to process:")
+        for part in expected_part_numbers:
+            print(f"       - P{part}")
+    else:
+        expected_part_numbers = None
+        print("[INFO] No expected part numbers configured - accepting all part numbers")
+    
     input_folder = filedialog.askdirectory(title="Select Folder Containing Images to Sort")
     
     if not input_folder:
