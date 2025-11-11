@@ -187,14 +187,18 @@ def has_required_barcodes(barcodes_found):
 def decode_barcodes(pil_image):
     """Decode Code 128 barcodes using multiple preprocessing techniques with early exit."""
     barcodes_found = []
+    barcode_regions = []  # Store barcode locations for zoomed retry
     img_array = np.array(pil_image)
     gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY) if len(img_array.shape) == 3 else img_array
     
-    # Try 1: Direct scan
-    for barcode in decode(pil_image, symbols=[ZBarSymbol.CODE128]):
+    # Try 1: Direct scan - also collect barcode locations
+    decoded_objects = decode(pil_image, symbols=[ZBarSymbol.CODE128])
+    for barcode in decoded_objects:
         data = barcode.data.decode('utf-8')
         if data not in barcodes_found:
             barcodes_found.append(data)
+        # Store region for potential zoom-in
+        barcode_regions.append(barcode.rect)
     if has_required_barcodes(barcodes_found):
         return barcodes_found
     
@@ -202,19 +206,25 @@ def decode_barcodes(pil_image):
     _, glare_mask = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY)
     glare_mask = cv2.dilate(glare_mask, np.ones((3,3), np.uint8), iterations=1)
     deglared = cv2.inpaint(gray, glare_mask, 3, cv2.INPAINT_TELEA)
-    for barcode in decode(Image.fromarray(deglared), symbols=[ZBarSymbol.CODE128]):
+    decoded_objects = decode(Image.fromarray(deglared), symbols=[ZBarSymbol.CODE128])
+    for barcode in decoded_objects:
         data = barcode.data.decode('utf-8')
         if data not in barcodes_found:
             barcodes_found.append(data)
+        if barcode.rect not in barcode_regions:
+            barcode_regions.append(barcode.rect)
     if has_required_barcodes(barcodes_found):
         return barcodes_found
     
     # Try 3: CLAHE enhancement
     enhanced = enhance_for_barcode_reading(img_array)
-    for barcode in decode(Image.fromarray(enhanced), symbols=[ZBarSymbol.CODE128]):
+    decoded_objects = decode(Image.fromarray(enhanced), symbols=[ZBarSymbol.CODE128])
+    for barcode in decoded_objects:
         data = barcode.data.decode('utf-8')
         if data not in barcodes_found:
             barcodes_found.append(data)
+        if barcode.rect not in barcode_regions:
+            barcode_regions.append(barcode.rect)
     if has_required_barcodes(barcodes_found):
         return barcodes_found
     
@@ -253,6 +263,39 @@ def decode_barcodes(pil_image):
             barcodes_found.append(data)
     if has_required_barcodes(barcodes_found):
         return barcodes_found
+    
+    # Try 8: Zoom into detected barcode regions and retry
+    # If we found some barcodes but not P&S, try zooming into those areas
+    if barcode_regions and not has_required_barcodes(barcodes_found):
+        for rect in barcode_regions:
+            # Expand region by 50% in all directions to get context
+            x, y, w, h = rect.left, rect.top, rect.width, rect.height
+            expand_factor = 0.5
+            x_expand = int(w * expand_factor)
+            y_expand = int(h * expand_factor)
+            
+            x1 = max(0, x - x_expand)
+            y1 = max(0, y - y_expand)
+            x2 = min(gray.shape[1], x + w + x_expand)
+            y2 = min(gray.shape[0], y + h + y_expand)
+            
+            # Extract and upscale the region 2x
+            region = gray[y1:y2, x1:x2]
+            if region.size == 0:
+                continue
+            
+            zoomed = cv2.resize(region, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+            
+            # Try multiple preprocessing on zoomed region
+            for attempt_img in [zoomed, 
+                               cv2.threshold(zoomed, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1],
+                               enhance_for_barcode_reading(zoomed)]:
+                for barcode in decode(Image.fromarray(attempt_img), symbols=[ZBarSymbol.CODE128]):
+                    data = barcode.data.decode('utf-8')
+                    if data not in barcodes_found:
+                        barcodes_found.append(data)
+                if has_required_barcodes(barcodes_found):
+                    return barcodes_found
     
     return barcodes_found
 
@@ -372,21 +415,26 @@ def create_folder_structure(base_folder, part_number, serial_number):
 
 def process_image_ocr(image_path, expected_part_numbers):
     """Process a single image with OCR - used for parallel processing."""
+    start_time = datetime.now()
     try:
         pil_image = Image.open(image_path)
         pil_image = apply_exif_orientation(pil_image)
         ocr_codes = extract_text_with_ocr(pil_image, expected_part_numbers)
+        processing_time = (datetime.now() - start_time).total_seconds()
         return {
             'image_path': image_path,
             'ocr_codes': ocr_codes,
-            'success': True
+            'success': True,
+            'processing_time': processing_time
         }
     except Exception as e:
+        processing_time = (datetime.now() - start_time).total_seconds()
         return {
             'image_path': image_path,
             'ocr_codes': [],
             'success': False,
-            'error': str(e)
+            'error': str(e),
+            'processing_time': processing_time
         }
 
 
@@ -635,6 +683,7 @@ def main():
                         try:
                             ocr_result = future.result()
                             ocr_codes = ocr_result['ocr_codes']
+                            processing_time = ocr_result.get('processing_time', 0)
                             
                             print(f"[{completed}/{len(images_needing_ocr)}] OCR: {os.path.basename(image_path)}", end=" ")
                             
@@ -643,9 +692,9 @@ def main():
                                     if code not in result['all_barcodes']:
                                         result['all_barcodes'].append(code)
                                 result['part_number'], result['serial_number'] = extract_identifiers(result['all_barcodes'])
-                                print(f"✓ Found P/S")
+                                print(f"✓ Found P/S ({processing_time:.1f}s)")
                             else:
-                                print(f"⚠ Nothing found")
+                                print(f"⚠ Nothing found ({processing_time:.1f}s)")
                         except Exception as e:
                             print(f"[{completed}/{len(images_needing_ocr)}] OCR: {os.path.basename(image_path)} ✗ Failed")
             except KeyboardInterrupt:
