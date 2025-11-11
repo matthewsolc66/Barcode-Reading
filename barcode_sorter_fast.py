@@ -1,8 +1,11 @@
 """
-Barcode Scanner and Image Sorter - Clean Version
+Barcode Scanner and Image Sorter - FAST Version with Parallel OCR
 
-Scans images for barcodes, extracts part numbers and serial numbers,
-and organizes images into folders based on those identifiers.
+Optimizations:
+- Early exit when P & S found in barcode scan
+- Early exit when P & S found in OCR
+- Reduced OCR attempts from 8 to 2 (4x faster)
+- Parallel OCR processing using all CPU cores
 """
 
 import os
@@ -55,7 +58,7 @@ def has_required_barcodes(barcodes_found):
 
 
 def decode_barcodes(pil_image):
-    """Decode Code 128 barcodes using multiple preprocessing techniques."""
+    """Decode Code 128 barcodes using multiple preprocessing techniques with early exit."""
     barcodes_found = []
     img_array = np.array(pil_image)
     gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY) if len(img_array.shape) == 3 else img_array
@@ -128,7 +131,7 @@ def decode_barcodes(pil_image):
 
 
 def extract_text_with_ocr(pil_image, expected_part_number=None):
-    """Use OCR to extract part/serial numbers from text with early exit."""
+    """Use OCR to extract part/serial numbers with early exit - OPTIMIZED."""
     if not TESSERACT_AVAILABLE:
         return []
     
@@ -140,7 +143,7 @@ def extract_text_with_ocr(pil_image, expected_part_number=None):
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
     enhanced = clahe.apply(gray)
     
-    # Try multiple preprocessing methods (reduced from 4 to 2 most effective)
+    # OPTIMIZED: Only 2 preprocessing methods (reduced from 4)
     preprocessed = [
         enhanced,
         cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
@@ -150,7 +153,7 @@ def extract_text_with_ocr(pil_image, expected_part_number=None):
     match_exact = expected_part_number and '-' in expected_part_number
     match_prefix = expected_part_number and '-' not in expected_part_number
     
-    # Run OCR on each preprocessed version (only PSM 6, removed PSM 11)
+    # OPTIMIZED: Only PSM 6 (removed PSM 11)
     for img in preprocessed:
         try:
             text = pytesseract.image_to_string(Image.fromarray(img), 
@@ -175,7 +178,7 @@ def extract_text_with_ocr(pil_image, expected_part_number=None):
                 if normalized not in found_codes:
                     found_codes.append(normalized)
             
-            # EARLY EXIT: If we have both part and serial, stop OCR
+            # EARLY EXIT: Stop as soon as we have both part and serial
             if has_required_barcodes(found_codes):
                 return found_codes
                 
@@ -332,7 +335,7 @@ def main():
     """Main function."""
     script_start_time = datetime.now()
     print("=" * 80)
-    print("BARCODE IMAGE SORTER")
+    print("BARCODE IMAGE SORTER - FAST VERSION")
     print(f"Started at: {script_start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 80)
     
@@ -394,41 +397,73 @@ def main():
     print(f"\n[INFO] Found {len(image_files)} image(s)")
     print("=" * 80)
     
-    # PASS 1: Quick barcode scanning
-    print("\n[INFO] Pass 1: Quick barcode scanning...")
+    # PASS 1: Parallel barcode scanning
+    print("\n[INFO] Pass 1: Quick barcode scanning (PARALLEL PROCESSING)...")
     print(f"[INFO] Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 80)
     pass1_start = datetime.now()
+    
+    # Process images in parallel using all available CPU cores
+    max_workers = os.cpu_count() or 4
+    print(f"[INFO] Using {max_workers} parallel workers (CPU cores)")
+    print("=" * 80)
+    
     all_results = []
-    for idx, image_path in enumerate(image_files, 1):
-        print(f"[{idx}/{len(image_files)}] Scanning: {os.path.basename(image_path)}", end=" ")
-        result = process_image_barcode_only(image_path)
-        all_results.append(result)
+    completed = 0
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all barcode scanning jobs
+        future_to_path = {
+            executor.submit(process_image_barcode_only, image_path): image_path
+            for image_path in image_files
+        }
         
-        if result['success']:
-            if result['part_number'] and result['serial_number']:
-                print(f"✓ Part & Serial ({result['processing_time']:.1f}s)")
-            elif result['part_number']:
-                print(f"✓ Part only ({result['processing_time']:.1f}s)")
-            elif result['serial_number']:
-                print(f"✓ Serial only ({result['processing_time']:.1f}s)")
-            elif result['all_barcodes']:
-                print(f"⚠ {len(result['all_barcodes'])} barcode(s) ({result['processing_time']:.1f}s)")
-            else:
-                print(f"⚠ No barcodes ({result['processing_time']:.1f}s)")
-        else:
-            print(f"✗ Error ({result['processing_time']:.1f}s)")
+        # Process completed jobs as they finish
+        for future in as_completed(future_to_path):
+            completed += 1
+            image_path = future_to_path[future]
+            
+            try:
+                result = future.result()
+                all_results.append(result)
+                
+                print(f"[{completed}/{len(image_files)}] Scanned: {os.path.basename(image_path)}", end=" ")
+                
+                if result['success']:
+                    if result['part_number'] and result['serial_number']:
+                        print(f"✓ Part & Serial ({result['processing_time']:.1f}s)")
+                    elif result['part_number']:
+                        print(f"✓ Part only ({result['processing_time']:.1f}s)")
+                    elif result['serial_number']:
+                        print(f"✓ Serial only ({result['processing_time']:.1f}s)")
+                    elif result['all_barcodes']:
+                        print(f"⚠ {len(result['all_barcodes'])} barcode(s) ({result['processing_time']:.1f}s)")
+                    else:
+                        print(f"⚠ No barcodes ({result['processing_time']:.1f}s)")
+                else:
+                    print(f"✗ Error ({result['processing_time']:.1f}s)")
+            except Exception as e:
+                print(f"[{completed}/{len(image_files)}] Scanned: {os.path.basename(image_path)} ✗ Failed")
+                all_results.append({
+                    'image_path': image_path,
+                    'part_number': None,
+                    'serial_number': None,
+                    'all_barcodes': [],
+                    'success': False,
+                    'error': str(e),
+                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    'processing_time': 0
+                })
     
     pass1_duration = (datetime.now() - pass1_start).total_seconds()
     print("=" * 80)
     print(f"[INFO] Pass 1 completed in {pass1_duration:.1f}s ({pass1_duration/60:.1f} minutes)")
     print(f"[INFO] Finished at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
-    # PASS 2: OCR fallback with parallel processing
+    # PASS 2: Parallel OCR fallback
     images_needing_ocr = [r for r in all_results if not has_required_barcodes(r['all_barcodes'])]
     
     if images_needing_ocr:
-        print(f"\n[INFO] Pass 2: OCR fallback for {len(images_needing_ocr)} images (parallel processing)...")
+        print(f"\n[INFO] Pass 2: OCR fallback for {len(images_needing_ocr)} images (PARALLEL PROCESSING)...")
         print(f"[INFO] Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print("=" * 80)
         pass2_start = datetime.now()
@@ -438,7 +473,8 @@ def main():
         
         # Process images in parallel using all available CPU cores
         max_workers = os.cpu_count() or 4
-        print(f"[INFO] Using {max_workers} parallel workers")
+        print(f"[INFO] Using {max_workers} parallel workers (CPU cores)")
+        print("=" * 80)
         
         completed = 0
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
