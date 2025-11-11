@@ -752,9 +752,9 @@ def run_test_mode(expected_part_numbers):
     found_nothing = sum(1 for r in test_results if not r['part_number'] and not r['serial_number'])
     
     print(f"Total images tested: {len(test_results)}")
-    print(f"  ✓ Found both P & S: {found_both}")
-    print(f"  ⚠ Found only Part: {found_part - found_both}")
-    print(f"  ⚠ Found only Serial: {found_serial - found_both}")
+    print(f"  ✅ Found both P & S: {found_both}")
+    print(f"  ⚠️  Found only Part: {found_part - found_both}")
+    print(f"  ⚠️  Found only Serial: {found_serial - found_both}")
     print(f"  ❌ Found nothing: {found_nothing}")
     print("=" * 80)
     print("[INFO] Test mode complete. No files were sorted or moved.")
@@ -884,19 +884,19 @@ def main():
                     print(f"⊘ Skipped (plain packaging) ({result['processing_time']:.2f}s)")
                 elif result['success']:
                     if result['part_number'] and result['serial_number']:
-                        print(f"✓ Part & Serial ({result['processing_time']:.1f}s)")
+                        print(f"✅ Part & Serial ({result['processing_time']:.1f}s)")
                     elif result['part_number']:
-                        print(f"✓ Part only ({result['processing_time']:.1f}s)")
+                        print(f"✅ Part only ({result['processing_time']:.1f}s)")
                     elif result['serial_number']:
-                        print(f"✓ Serial only ({result['processing_time']:.1f}s)")
+                        print(f"✅ Serial only ({result['processing_time']:.1f}s)")
                     elif result['all_barcodes']:
-                        print(f"⚠ {len(result['all_barcodes'])} barcode(s) ({result['processing_time']:.1f}s)")
+                        print(f"⚠️  {len(result['all_barcodes'])} barcode(s) ({result['processing_time']:.1f}s)")
                     else:
-                        print(f"⚠ No barcodes ({result['processing_time']:.1f}s)")
+                        print(f"⚠️  No barcodes ({result['processing_time']:.1f}s)")
                 else:
-                    print(f"✗ Error ({result['processing_time']:.1f}s)")
+                    print(f"❌ Error ({result['processing_time']:.1f}s)")
             except Exception as e:
-                print(f"[{completed}/{len(image_files)}] Scanned: {os.path.basename(image_path)} ✗ Failed")
+                print(f"[{completed}/{len(image_files)}] Scanned: {os.path.basename(image_path)} ❌ Failed")
                 all_results.append({
                     'image_path': image_path,
                     'part_number': None,
@@ -974,11 +974,11 @@ def main():
                                 if code not in result['all_barcodes']:
                                     result['all_barcodes'].append(code)
                             result['part_number'], result['serial_number'] = extract_identifiers(result['all_barcodes'])
-                            print(f"✓ Found P/S ({processing_time:.1f}s)")
+                            print(f"✅ Found P/S ({processing_time:.1f}s)")
                         else:
-                            print(f"⚠ Nothing found ({processing_time:.1f}s)")
+                            print(f"⚠️  Nothing found ({processing_time:.1f}s)")
                     except Exception as e:
-                        print(f"[{completed}/{len(images_needing_ocr)}] OCR: {os.path.basename(image_path)} ✗ Failed")
+                        print(f"[{completed}/{len(images_needing_ocr)}] OCR: {os.path.basename(image_path)} ❌ Failed")
             except KeyboardInterrupt:
                 interrupted = True
                 print("\n[INFO] Keyboard interrupt in Pass 2")
@@ -1037,7 +1037,7 @@ def main():
                 if not part_number:
                     print(f"→ Unsorted ({copy_time:.2f}s)")
                 else:
-                    print(f"✓ ({copy_time:.2f}s)")
+                    print(f"✅ ({copy_time:.2f}s)")
                 
                 final_results.append({
                     'filename': os.path.basename(result['image_path']),
@@ -1050,7 +1050,7 @@ def main():
                     'processing_time': result.get('processing_time', 0)
                 })
             except Exception as e:
-                print(f"✗ ({copy_time:.2f}s)")
+                print(f"❌ ({copy_time:.2f}s)")
                 final_results.append({
                     'filename': os.path.basename(result['image_path']),
                     'part_number': part_number,
