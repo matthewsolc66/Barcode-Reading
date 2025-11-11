@@ -164,18 +164,18 @@ def correct_ocr_part_number(detected_part, expected_parts):
     if detected_part in expected_parts:
         return detected_part
     
-    # Common OCR character substitutions
+    # Common OCR character substitutions based on visual similarity
     ocr_mistakes = {
-        '0': ['8', '6', '9'],
-        '1': ['7', '4', '5'],
-        '2': ['8', '4', '3'],
-        '3': ['8', '2', '5'],
-        '4': ['8', '2', '1'],
-        '5': ['6', '3', '8', '1'],
-        '6': ['8', '5', '0'],
-        '7': ['1', '4'],
-        '8': ['0', '3', '6', '4', '2'],
-        '9': ['0', '8']
+        '0': ['8', 'O'],      # 0 looks like 8 when blurry/partial, or letter O
+        '1': ['7', 'I'],      # 1 looks like 7 at angles, or letter I
+        '2': ['Z'],           # 2 can look like Z
+        '3': ['8'],           # 3 looks like 8 when middle closes
+        '4': ['A'],           # 4 can look like A
+        '5': ['S'],           # 5 can look like letter S
+        '6': ['8', '5'],      # 6 looks like 8 or 5 when partial
+        '7': ['1'],           # 7 looks like 1 at angles
+        '8': ['0', '3', '6', 'B'],  # 8 is commonly confused with 0, 3, 6, and B
+        '9': ['8']            # 9 looks like 8 when bottom closes
     }
     
     best_match = None
@@ -672,59 +672,64 @@ def main():
     print("=" * 80)
     
     completed = 0
+    executor = None
     try:
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all barcode scanning jobs
-            future_to_path = {
-                executor.submit(process_image_barcode_only, image_path): image_path
-                for image_path in image_files
-            }
-            
-            # Process completed jobs as they finish
-            for future in as_completed(future_to_path):
-                if interrupted:
-                    print("\n[INFO] Stopping Pass 1 early...")
-                    break
-                    
-                completed += 1
-                image_path = future_to_path[future]
+        executor = ProcessPoolExecutor(max_workers=max_workers)
+        # Submit all barcode scanning jobs
+        future_to_path = {
+            executor.submit(process_image_barcode_only, image_path): image_path
+            for image_path in image_files
+        }
+        
+        # Process completed jobs as they finish
+        for future in as_completed(future_to_path):
+            if interrupted:
+                print("\n[INFO] Stopping Pass 1 early...")
+                executor.shutdown(wait=False, cancel_futures=True)
+                break
                 
-                try:
-                    result = future.result()
-                    all_results.append(result)
-                    
-                    print(f"[{completed}/{len(image_files)}] Scanned: {os.path.basename(image_path)}", end=" ")
-                    
-                    if result.get('skipped'):
-                        print(f"⊘ Skipped (plain packaging) ({result['processing_time']:.2f}s)")
-                    elif result['success']:
-                        if result['part_number'] and result['serial_number']:
-                            print(f"✓ Part & Serial ({result['processing_time']:.1f}s)")
-                        elif result['part_number']:
-                            print(f"✓ Part only ({result['processing_time']:.1f}s)")
-                        elif result['serial_number']:
-                            print(f"✓ Serial only ({result['processing_time']:.1f}s)")
-                        elif result['all_barcodes']:
-                            print(f"⚠ {len(result['all_barcodes'])} barcode(s) ({result['processing_time']:.1f}s)")
-                        else:
-                            print(f"⚠ No barcodes ({result['processing_time']:.1f}s)")
+            completed += 1
+            image_path = future_to_path[future]
+            
+            try:
+                result = future.result()
+                all_results.append(result)
+                
+                print(f"[{completed}/{len(image_files)}] Scanned: {os.path.basename(image_path)}", end=" ")
+                
+                if result.get('skipped'):
+                    print(f"⊘ Skipped (plain packaging) ({result['processing_time']:.2f}s)")
+                elif result['success']:
+                    if result['part_number'] and result['serial_number']:
+                        print(f"✓ Part & Serial ({result['processing_time']:.1f}s)")
+                    elif result['part_number']:
+                        print(f"✓ Part only ({result['processing_time']:.1f}s)")
+                    elif result['serial_number']:
+                        print(f"✓ Serial only ({result['processing_time']:.1f}s)")
+                    elif result['all_barcodes']:
+                        print(f"⚠ {len(result['all_barcodes'])} barcode(s) ({result['processing_time']:.1f}s)")
                     else:
-                        print(f"✗ Error ({result['processing_time']:.1f}s)")
-                except Exception as e:
-                    print(f"[{completed}/{len(image_files)}] Scanned: {os.path.basename(image_path)} ✗ Failed")
-                    all_results.append({
-                        'image_path': image_path,
-                        'part_number': None,
-                        'serial_number': None,
-                        'all_barcodes': [],
-                        'success': False,
-                        'error': str(e),
-                        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                        'processing_time': 0
-                    })
+                        print(f"⚠ No barcodes ({result['processing_time']:.1f}s)")
+                else:
+                    print(f"✗ Error ({result['processing_time']:.1f}s)")
+            except Exception as e:
+                print(f"[{completed}/{len(image_files)}] Scanned: {os.path.basename(image_path)} ✗ Failed")
+                all_results.append({
+                    'image_path': image_path,
+                    'part_number': None,
+                    'serial_number': None,
+                    'all_barcodes': [],
+                    'success': False,
+                    'error': str(e),
+                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    'processing_time': 0
+                })
     except KeyboardInterrupt:
         interrupted = True
         print("\n[INFO] Keyboard interrupt in Pass 1")
+    finally:
+        if executor:
+            executor.shutdown(wait=False, cancel_futures=True)
     
     pass1_duration = (datetime.now() - pass1_start).total_seconds()
     print("=" * 80)
@@ -755,44 +760,49 @@ def main():
             print("=" * 80)
             
             completed = 0
+            executor2 = None
             try:
-                with ProcessPoolExecutor(max_workers=max_workers) as executor:
-                    # Submit all OCR jobs
-                    future_to_path = {
-                        executor.submit(process_image_ocr, r['image_path'], expected_part_numbers): r['image_path']
-                        for r in images_needing_ocr
-                    }
+                executor2 = ProcessPoolExecutor(max_workers=max_workers)
+                # Submit all OCR jobs
+                future_to_path = {
+                    executor2.submit(process_image_ocr, r['image_path'], expected_part_numbers): r['image_path']
+                    for r in images_needing_ocr
+                }
+                
+                # Process completed jobs as they finish
+                for future in as_completed(future_to_path):
+                    if interrupted:
+                        print("\n[INFO] Stopping Pass 2 early...")
+                        executor2.shutdown(wait=False, cancel_futures=True)
+                        break
                     
-                    # Process completed jobs as they finish
-                    for future in as_completed(future_to_path):
-                        if interrupted:
-                            print("\n[INFO] Stopping Pass 2 early...")
-                            break
+                    completed += 1
+                    image_path = future_to_path[future]
+                    result = result_map[image_path]
+                    
+                    try:
+                        ocr_result = future.result()
+                        ocr_codes = ocr_result['ocr_codes']
+                        processing_time = ocr_result.get('processing_time', 0)
                         
-                        completed += 1
-                        image_path = future_to_path[future]
-                        result = result_map[image_path]
+                        print(f"[{completed}/{len(images_needing_ocr)}] OCR: {os.path.basename(image_path)}", end=" ")
                         
-                        try:
-                            ocr_result = future.result()
-                            ocr_codes = ocr_result['ocr_codes']
-                            processing_time = ocr_result.get('processing_time', 0)
-                            
-                            print(f"[{completed}/{len(images_needing_ocr)}] OCR: {os.path.basename(image_path)}", end=" ")
-                            
-                            if ocr_codes:
-                                for code in ocr_codes:
-                                    if code not in result['all_barcodes']:
-                                        result['all_barcodes'].append(code)
-                                result['part_number'], result['serial_number'] = extract_identifiers(result['all_barcodes'])
-                                print(f"✓ Found P/S ({processing_time:.1f}s)")
-                            else:
-                                print(f"⚠ Nothing found ({processing_time:.1f}s)")
-                        except Exception as e:
-                            print(f"[{completed}/{len(images_needing_ocr)}] OCR: {os.path.basename(image_path)} ✗ Failed")
+                        if ocr_codes:
+                            for code in ocr_codes:
+                                if code not in result['all_barcodes']:
+                                    result['all_barcodes'].append(code)
+                            result['part_number'], result['serial_number'] = extract_identifiers(result['all_barcodes'])
+                            print(f"✓ Found P/S ({processing_time:.1f}s)")
+                        else:
+                            print(f"⚠ Nothing found ({processing_time:.1f}s)")
+                    except Exception as e:
+                        print(f"[{completed}/{len(images_needing_ocr)}] OCR: {os.path.basename(image_path)} ✗ Failed")
             except KeyboardInterrupt:
                 interrupted = True
                 print("\n[INFO] Keyboard interrupt in Pass 2")
+            finally:
+                if executor2:
+                    executor2.shutdown(wait=False, cancel_futures=True)
             
             pass2_duration = (datetime.now() - pass2_start).total_seconds()
             print("=" * 80)
