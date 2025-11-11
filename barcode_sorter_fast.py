@@ -15,6 +15,7 @@ import shutil
 import warnings
 import signal
 import sys
+import psutil
 from datetime import datetime
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from tkinter import Tk, filedialog, simpledialog, messagebox, Toplevel, Checkbutton, IntVar, Button, Label, Frame, Scale, HORIZONTAL
@@ -42,7 +43,12 @@ def select_part_numbers_dialog(part_numbers):
     
     selected_parts = []
     selected_workers = None
-    max_workers = os.cpu_count() or 4
+    
+    # Get physical core count (not logical/hyperthreaded)
+    try:
+        max_workers = psutil.cpu_count(logical=False)
+    except:
+        max_workers = os.cpu_count() or 4
     
     # Create dialog window
     dialog = Toplevel()
@@ -84,8 +90,12 @@ def select_part_numbers_dialog(part_numbers):
     worker_frame = Frame(dialog)
     worker_frame.pack(pady=10, padx=20)
     
-    Label(worker_frame, text="Parallel Workers (CPU Cores):", 
+    Label(worker_frame, text="Parallel Workers:", 
           font=("Arial", 10, "bold")).pack()
+    
+    # Info label
+    Label(worker_frame, text=f"(Physical CPU cores: {max_workers})", 
+          font=("Arial", 8), fg="gray").pack()
     
     # Slider value display
     worker_value_label = Label(worker_frame, text=f"{max_workers}", 
@@ -373,8 +383,9 @@ def decode_barcodes(pil_image):
     
     # Try 8: Zoom into detected barcode regions and retry
     # If we found some barcodes but not P&S, try zooming into those areas
+    # LIMIT: Only try first 5 regions to avoid exponential slowdown
     if barcode_regions and not has_required_barcodes(barcodes_found):
-        for rect in barcode_regions:
+        for rect in barcode_regions[:5]:  # LIMIT to first 5 regions
             # Expand region by 50% in all directions to get context
             x, y, w, h = rect.left, rect.top, rect.width, rect.height
             expand_factor = 0.5
@@ -401,8 +412,12 @@ def decode_barcodes(pil_image):
                     data = barcode.data.decode('utf-8')
                     if data not in barcodes_found:
                         barcodes_found.append(data)
+                # Early exit after each preprocessing method
                 if has_required_barcodes(barcodes_found):
                     return barcodes_found
+            # Early exit after each region
+            if has_required_barcodes(barcodes_found):
+                return barcodes_found
     
     return barcodes_found
 

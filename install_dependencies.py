@@ -39,6 +39,7 @@ def main():
     print("  - opencv-python (Image preprocessing)")
     print("  - numpy (Numerical operations)")
     print("  - pytesseract (OCR fallback)")
+    print("  - psutil (System information)")
     print("\nNote: You will also need to install Tesseract-OCR separately")
     print("for OCR functionality. Download from:")
     print("https://github.com/UB-Mannheim/tesseract/wiki")
@@ -52,7 +53,8 @@ def main():
         ("pyzbar", "pyzbar"),
         ("opencv-python", "opencv-python (cv2)"),
         ("numpy", "numpy"),
-        ("pytesseract", "pytesseract")
+        ("pytesseract", "pytesseract"),
+        ("psutil", "psutil")
     ]
     
     results = []
