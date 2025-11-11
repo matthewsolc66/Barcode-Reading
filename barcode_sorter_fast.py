@@ -50,10 +50,36 @@ def enhance_for_barcode_reading(image_array):
     return clahe.apply(gray)
 
 
+def is_valid_serial_number(serial):
+    """Validate serial number format and date code.
+    Format: S + 10-digit vendor code + 4-digit date (WWYY) + 4-digit part ID
+    Example: S9000167952 0825 8026 where 08=week, 25=year
+    """
+    if not re.fullmatch(r'^S900\d{15}$', serial):
+        return False
+    
+    # Extract date code (characters 11-14, 0-indexed: positions 11,12,13,14)
+    # S=0, vendor=1-10, date=11-14, part=15-18
+    date_code = serial[11:15]
+    week = int(date_code[0:2])
+    year = int(date_code[2:4])
+    
+    # Validate week (01-52)
+    if week < 1 or week > 52:
+        return False
+    
+    # Validate year (24 to current_year+1)
+    current_year = datetime.now().year % 100  # Get last 2 digits (e.g., 2025 -> 25)
+    if year < 24 or year > (current_year + 1):
+        return False
+    
+    return True
+
+
 def has_required_barcodes(barcodes_found):
-    """Check if we have both part number and serial number."""
+    """Check if we have both part number and valid serial number."""
     has_part = any(re.fullmatch(r'^P\d{4}-\d{5}$', b) for b in barcodes_found)
-    has_serial = any(re.fullmatch(r'^S900\d{15}$', b) for b in barcodes_found)
+    has_serial = any(is_valid_serial_number(b) for b in barcodes_found)
     return has_part and has_serial
 
 
@@ -172,10 +198,11 @@ def extract_text_with_ocr(pil_image, expected_part_number=None):
                 if normalized not in found_codes and re.fullmatch(r'^P\d{4}-\d{5}$', normalized):
                     found_codes.append(normalized)
             
-            # Extract serial numbers (must start with 900)
+            # Extract serial numbers (must start with 900 and have valid date code)
             for match in re.findall(r'900\d{15}', text):
                 normalized = f"S{match}"
-                if normalized not in found_codes:
+                # Validate serial number before adding
+                if normalized not in found_codes and is_valid_serial_number(normalized):
                     found_codes.append(normalized)
             
             # EARLY EXIT: Stop as soon as we have both part and serial
@@ -189,10 +216,10 @@ def extract_text_with_ocr(pil_image, expected_part_number=None):
 
 
 def classify_barcode(data):
-    """Classify barcode based on pattern."""
+    """Classify barcode based on pattern and validate serial numbers."""
     if re.fullmatch(r'^P\d{4}-\d{5}$', data):
         return "Part Number"
-    elif re.fullmatch(r'^S900\d{15}$', data):
+    elif is_valid_serial_number(data):
         return "Serial Number"
     elif re.fullmatch(r'^Q\d+$', data):
         return "Quantity"
@@ -218,23 +245,59 @@ def extract_identifiers(barcodes):
     return part_number, serial_number
 
 
-def create_folder_structure(base_folder, part_number, serial_number):
-    """Create folder structure: base_folder/part_number_without_P/last_8_digits_of_serial"""
-    if not part_number and not serial_number:
-        target_folder = os.path.join(base_folder, "_Unidentified")
+def create_folder_structure(base_folder, part_number, serial_number, is_skipped=False):
+    """Create folder structure based on what was detected."""
+    # If image was skipped (plain packaging/security seal)
+    if is_skipped:
+        target_folder = os.path.join(base_folder, "_Security_Seals")
+    # If no part number (even if serial exists), put in unsorted
+    elif not part_number:
+        target_folder = os.path.join(base_folder, "_Unsorted")
+    # If we have part number and serial number
     elif part_number and serial_number:
         part_folder = part_number[1:] if part_number.startswith('P') else part_number
         serial_folder = serial_number[-8:] if len(serial_number) >= 8 else serial_number
         target_folder = os.path.join(base_folder, part_folder, serial_folder)
+    # If only part number (no serial)
     elif part_number:
         part_folder = part_number[1:] if part_number.startswith('P') else part_number
         target_folder = os.path.join(base_folder, part_folder, "_No_Serial")
     else:
-        serial_folder = serial_number[-8:] if len(serial_number) >= 8 else serial_number
-        target_folder = os.path.join(base_folder, "_No_Part", serial_folder)
+        # Fallback (shouldn't reach here based on logic above)
+        target_folder = os.path.join(base_folder, "_Unsorted")
     
     os.makedirs(target_folder, exist_ok=True)
     return target_folder
+
+
+def is_plain_packaging_image(pil_image):
+    """Detect plain packaging images (no labels/barcodes visible) to skip processing."""
+    try:
+        # Convert to numpy array and resize for speed
+        img_array = np.array(pil_image)
+        small_img = cv2.resize(img_array, (400, 400))
+        
+        # Convert to grayscale
+        if len(small_img.shape) == 3:
+            gray = cv2.cvtColor(small_img, cv2.COLOR_RGB2GRAY)
+        else:
+            gray = small_img
+        
+        # Look for bright regions (white/beige labels)
+        # Labels are typically 150-255 in grayscale (lowered threshold to catch more labels)
+        _, bright_mask = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
+        bright_percentage = (np.sum(bright_mask > 0) / bright_mask.size) * 100
+        
+        # VERY STRICT: Only skip if there's almost NOTHING bright
+        # This image has a large white label, so bright_percentage should be >10%
+        # We only skip if <5% is bright (basically just security seals/small logos)
+        should_skip = (bright_percentage < 5)
+        
+        return should_skip
+        
+    except Exception:
+        # If analysis fails, process the image normally
+        return False
 
 
 def process_image_ocr(image_path, expected_part_number):
@@ -258,11 +321,26 @@ def process_image_ocr(image_path, expected_part_number):
 
 
 def process_image_barcode_only(image_path):
-    """Quick barcode scan only - no OCR fallback."""
+    """Quick barcode scan only - no OCR fallback. Skips plain packaging images."""
     start_time = datetime.now()
     try:
         pil_image = Image.open(image_path)
         pil_image = apply_exif_orientation(pil_image)
+        
+        # Check if this is a plain packaging image
+        if is_plain_packaging_image(pil_image):
+            return {
+                'image_path': image_path,
+                'part_number': None,
+                'serial_number': None,
+                'all_barcodes': [],
+                'success': True,
+                'skipped': True,
+                'skip_reason': 'Plain packaging detected',
+                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'processing_time': (datetime.now() - start_time).total_seconds()
+            }
+        
         barcodes = decode_barcodes(pil_image)
         part_number, serial_number = extract_identifiers(barcodes)
         
@@ -272,6 +350,7 @@ def process_image_barcode_only(image_path):
             'serial_number': serial_number,
             'all_barcodes': barcodes,
             'success': True,
+            'skipped': False,
             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             'processing_time': (datetime.now() - start_time).total_seconds()
         }
@@ -282,6 +361,7 @@ def process_image_barcode_only(image_path):
             'serial_number': None,
             'all_barcodes': [],
             'success': False,
+            'skipped': False,
             'error': str(e),
             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             'processing_time': (datetime.now() - start_time).total_seconds()
@@ -428,7 +508,9 @@ def main():
                 
                 print(f"[{completed}/{len(image_files)}] Scanned: {os.path.basename(image_path)}", end=" ")
                 
-                if result['success']:
+                if result.get('skipped'):
+                    print(f"⊘ Skipped (plain packaging) ({result['processing_time']:.2f}s)")
+                elif result['success']:
                     if result['part_number'] and result['serial_number']:
                         print(f"✓ Part & Serial ({result['processing_time']:.1f}s)")
                     elif result['part_number']:
@@ -455,12 +537,15 @@ def main():
                 })
     
     pass1_duration = (datetime.now() - pass1_start).total_seconds()
+    skipped_count = sum(1 for r in all_results if r.get('skipped'))
     print("=" * 80)
     print(f"[INFO] Pass 1 completed in {pass1_duration:.1f}s ({pass1_duration/60:.1f} minutes)")
+    print(f"[INFO] Skipped {skipped_count} plain packaging images")
     print(f"[INFO] Finished at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
-    # PASS 2: Parallel OCR fallback
-    images_needing_ocr = [r for r in all_results if not has_required_barcodes(r['all_barcodes'])]
+    # PASS 2: Parallel OCR fallback (exclude skipped images)
+    images_needing_ocr = [r for r in all_results 
+                          if not r.get('skipped') and not has_required_barcodes(r['all_barcodes'])]
     
     if images_needing_ocr:
         print(f"\n[INFO] Pass 2: OCR fallback for {len(images_needing_ocr)} images (PARALLEL PROCESSING)...")
@@ -531,13 +616,14 @@ def main():
         
         part_number = result['part_number']
         serial_number = result['serial_number']
+        is_skipped = result.get('skipped', False)
         
-        # Match serial to part if needed
-        if serial_number and not part_number and serial_number in serial_to_part:
+        # Match serial to part if needed (only if image wasn't skipped)
+        if not is_skipped and serial_number and not part_number and serial_number in serial_to_part:
             part_number = serial_to_part[serial_number]
         
-        # Copy file
-        target_folder = create_folder_structure(output_folder, part_number, serial_number)
+        # Copy file with appropriate folder structure
+        target_folder = create_folder_structure(output_folder, part_number, serial_number, is_skipped)
         target_path = os.path.join(target_folder, os.path.basename(result['image_path']))
         
         copy_time = (datetime.now() - copy_start).total_seconds()
@@ -545,7 +631,14 @@ def main():
         
         try:
             shutil.copy2(result['image_path'], target_path)
-            print(f"✓ ({copy_time:.2f}s)")
+            
+            # Show appropriate message based on destination
+            if is_skipped:
+                print(f"→ Security Seals ({copy_time:.2f}s)")
+            elif not part_number:
+                print(f"→ Unsorted ({copy_time:.2f}s)")
+            else:
+                print(f"✓ ({copy_time:.2f}s)")
             
             final_results.append({
                 'filename': os.path.basename(result['image_path']),
@@ -555,7 +648,8 @@ def main():
                 'target_folder': target_folder,
                 'success': True,
                 'timestamp': timestamp,
-                'processing_time': result.get('processing_time', 0)
+                'processing_time': result.get('processing_time', 0),
+                'skipped': is_skipped
             })
         except Exception as e:
             print(f"✗ ({copy_time:.2f}s)")
@@ -568,7 +662,8 @@ def main():
                 'success': False,
                 'error': str(e),
                 'timestamp': timestamp,
-                'processing_time': result.get('processing_time', 0)
+                'processing_time': result.get('processing_time', 0),
+                'skipped': is_skipped
             })
     
     pass3_duration = (datetime.now() - pass3_start).total_seconds()
