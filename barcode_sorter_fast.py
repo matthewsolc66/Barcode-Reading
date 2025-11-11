@@ -39,10 +39,11 @@ os.environ['PYTHONWARNINGS'] = 'ignore'
 def select_part_numbers_dialog(part_numbers):
     """Show GUI dialog with checkboxes to select which part numbers to process."""
     if not part_numbers:
-        return None, None
+        return None, None, False
     
     selected_parts = []
     selected_workers = None
+    test_mode = False
     
     # Get physical core count (not logical/hyperthreaded)
     try:
@@ -64,10 +65,20 @@ def select_part_numbers_dialog(part_numbers):
     y = (dialog.winfo_screenheight() // 2) - (height // 2)
     dialog.geometry(f'{width}x{height}+{x}+{y}')
     
-    # Title label
-    title_label = Label(dialog, text="Select which part numbers to process:", 
-                       font=("Arial", 11, "bold"), pady=10)
-    title_label.pack()
+    # Top frame for title and test mode button
+    top_frame = Frame(dialog)
+    top_frame.pack(fill="x", pady=10, padx=20)
+    
+    # Title label (left side)
+    title_label = Label(top_frame, text="Select which part numbers to process:", 
+                       font=("Arial", 11, "bold"))
+    title_label.pack(side="left")
+    
+    # Test Mode button (right side)
+    test_mode_btn = Button(top_frame, text="Test Mode", 
+                          command=lambda: on_test_mode(),
+                          bg="#2196F3", fg="white", width=10)
+    test_mode_btn.pack(side="right")
     
     # Frame for checkboxes with scrollbar if needed
     checkbox_frame = Frame(dialog)
@@ -118,6 +129,12 @@ def select_part_numbers_dialog(part_numbers):
     button_frame = Frame(dialog)
     button_frame.pack(pady=15)
     
+    def on_test_mode():
+        """Handle Test Mode button click."""
+        nonlocal test_mode
+        test_mode = True
+        dialog.destroy()
+    
     def on_ok():
         nonlocal selected_parts, selected_workers
         selected_parts = [part for part, var in checkbox_vars if var.get() == 1]
@@ -149,7 +166,7 @@ def select_part_numbers_dialog(part_numbers):
     dialog.grab_set()
     dialog.wait_window()
     
-    return selected_parts, selected_workers
+    return selected_parts, selected_workers, test_mode
 
 
 def load_expected_part_numbers(config_file='part_numbers_config.txt'):
@@ -636,6 +653,114 @@ def generate_report(results, output_folder, total_time=None):
     print(f"\n[INFO] Report saved to: {report_path}")
 
 
+def run_test_mode(expected_part_numbers):
+    """Run test mode: select 1-10 images and display extracted data without sorting."""
+    print("\n" + "=" * 80)
+    print("TEST MODE - Quick Debug Check")
+    print("=" * 80)
+    
+    root = Tk()
+    root.withdraw()
+    
+    # Select images (1-10)
+    image_files = filedialog.askopenfilenames(
+        title="Select 1-10 Images to Test",
+        filetypes=[
+            ("Image files", "*.png *.jpg *.jpeg *.bmp *.tiff *.tif"),
+            ("All files", "*.*")
+        ]
+    )
+    
+    if not image_files:
+        print("[INFO] No images selected. Exiting test mode.")
+        return
+    
+    if len(image_files) > 10:
+        messagebox.showwarning("Too Many Images", 
+                              f"Selected {len(image_files)} images. Limiting to first 10.")
+        image_files = image_files[:10]
+    
+    print(f"[INFO] Testing {len(image_files)} image(s)...")
+    print("=" * 80)
+    
+    test_results = []
+    
+    for idx, image_path in enumerate(image_files, 1):
+        filename = os.path.basename(image_path)
+        print(f"\n[{idx}/{len(image_files)}] Processing: {filename}")
+        print("-" * 80)
+        
+        result = {
+            'filename': filename,
+            'part_number': None,
+            'serial_number': None,
+            'all_barcodes': [],
+            'method': None
+        }
+        
+        try:
+            # Try barcode first
+            barcode_result = process_image_barcode_only(image_path)
+            barcodes = barcode_result['all_barcodes']
+            
+            if barcodes:
+                result['all_barcodes'] = barcodes
+                part, serial = extract_identifiers(barcodes)
+                result['part_number'] = part
+                result['serial_number'] = serial
+                result['method'] = 'Barcode'
+            
+            # If no P&S found, try OCR
+            if not (result['part_number'] and result['serial_number']):
+                print("  → Trying OCR fallback...")
+                ocr_result = process_image_ocr(image_path, expected_part_numbers)
+                ocr_codes = ocr_result['ocr_codes']
+                
+                if ocr_codes:
+                    for code in ocr_codes:
+                        if code not in result['all_barcodes']:
+                            result['all_barcodes'].append(code)
+                    
+                    part, serial = extract_identifiers(result['all_barcodes'])
+                    result['part_number'] = part or result['part_number']
+                    result['serial_number'] = serial or result['serial_number']
+                    result['method'] = 'OCR' if not result['method'] else 'Barcode+OCR'
+            
+            # Display results
+            print(f"  Method: {result['method'] or 'None'}")
+            print(f"  Part Number: {result['part_number'] or '❌ Not found'}")
+            print(f"  Serial Number: {result['serial_number'] or '❌ Not found'}")
+            if result['all_barcodes']:
+                print(f"  All Codes Found: {', '.join(result['all_barcodes'])}")
+            else:
+                print(f"  All Codes Found: ❌ None")
+            
+        except Exception as e:
+            print(f"  ❌ ERROR: {str(e)}")
+            result['error'] = str(e)
+        
+        test_results.append(result)
+    
+    # Summary
+    print("\n" + "=" * 80)
+    print("TEST MODE SUMMARY")
+    print("=" * 80)
+    
+    found_both = sum(1 for r in test_results if r['part_number'] and r['serial_number'])
+    found_part = sum(1 for r in test_results if r['part_number'])
+    found_serial = sum(1 for r in test_results if r['serial_number'])
+    found_nothing = sum(1 for r in test_results if not r['part_number'] and not r['serial_number'])
+    
+    print(f"Total images tested: {len(test_results)}")
+    print(f"  ✓ Found both P & S: {found_both}")
+    print(f"  ⚠ Found only Part: {found_part - found_both}")
+    print(f"  ⚠ Found only Serial: {found_serial - found_both}")
+    print(f"  ❌ Found nothing: {found_nothing}")
+    print("=" * 80)
+    print("[INFO] Test mode complete. No files were sorted or moved.")
+    print("=" * 80)
+
+
 def main():
     """Main function with graceful Ctrl+C handling."""
     script_start_time = datetime.now()
@@ -667,10 +792,17 @@ def main():
     
     # Default max workers
     max_workers = os.cpu_count() or 4
+    test_mode = False
     
     # If we have expected parts, show selection dialog
     if all_expected_parts:
-        expected_part_numbers, max_workers = select_part_numbers_dialog(all_expected_parts)
+        expected_part_numbers, max_workers, test_mode = select_part_numbers_dialog(all_expected_parts)
+        
+        # Handle test mode
+        if test_mode:
+            run_test_mode(expected_part_numbers if expected_part_numbers else all_expected_parts)
+            return
+        
         if expected_part_numbers is None:
             print("[INFO] Cancelled. Exiting.")
             return
