@@ -18,7 +18,7 @@ import sys
 import psutil
 from datetime import datetime
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from tkinter import Tk, filedialog, simpledialog, messagebox, Toplevel, Checkbutton, IntVar, Button, Label, Frame, Scale, HORIZONTAL
+from tkinter import Tk, filedialog, simpledialog, messagebox, Toplevel, Checkbutton, IntVar, Button, Label, Frame, Scale, HORIZONTAL, Canvas, Scrollbar, VERTICAL
 from PIL import Image, ImageOps
 from pyzbar.pyzbar import decode, ZBarSymbol
 import cv2
@@ -54,7 +54,7 @@ def select_part_numbers_dialog(part_numbers):
     # Create dialog window
     dialog = Toplevel()
     dialog.title("Select Part Numbers and Workers")
-    dialog.geometry("450x500")
+    dialog.geometry("450x600")
     dialog.resizable(False, False)
     
     # Center the window
@@ -80,9 +80,25 @@ def select_part_numbers_dialog(part_numbers):
                           bg="#2196F3", fg="white", width=10)
     test_mode_btn.pack(side="right")
     
-    # Frame for checkboxes with scrollbar if needed
-    checkbox_frame = Frame(dialog)
-    checkbox_frame.pack(pady=10, padx=20, fill="both", expand=True)
+    # Frame for checkboxes with scrollbar
+    checkbox_container = Frame(dialog, height=250)  # Limit height
+    checkbox_container.pack(pady=10, padx=20, fill="both", expand=False)
+    checkbox_container.pack_propagate(False)  # Maintain fixed height
+    
+    # Create canvas and scrollbar
+    canvas = Canvas(checkbox_container, highlightthickness=0)
+    scrollbar = Scrollbar(checkbox_container, orient=VERTICAL, command=canvas.yview)
+    checkbox_frame = Frame(canvas)
+    
+    # Configure canvas
+    canvas.configure(yscrollcommand=scrollbar.set)
+    
+    # Pack scrollbar and canvas
+    scrollbar.pack(side="right", fill="y")
+    canvas.pack(side="left", fill="both", expand=True)
+    
+    # Create window in canvas for checkboxes
+    canvas_frame = canvas.create_window((0, 0), window=checkbox_frame, anchor="nw")
     
     # Create checkboxes
     checkbox_vars = []
@@ -92,6 +108,15 @@ def select_part_numbers_dialog(part_numbers):
                         font=("Arial", 10), anchor="w")
         cb.pack(fill="x", pady=2)
         checkbox_vars.append((part, var))
+    
+    # Update scrollregion after adding all checkboxes
+    def configure_scroll_region(event=None):
+        canvas.configure(scrollregion=canvas.bbox("all"))
+        # Set canvas width to match checkbox_frame width
+        canvas.itemconfig(canvas_frame, width=canvas.winfo_width())
+    
+    checkbox_frame.bind("<Configure>", configure_scroll_region)
+    canvas.bind("<Configure>", configure_scroll_region)
     
     # Separator
     separator = Frame(dialog, height=2, bd=1, relief="sunken")
