@@ -17,7 +17,7 @@ import signal
 import sys
 from datetime import datetime
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from tkinter import Tk, filedialog, simpledialog, messagebox, Toplevel, Checkbutton, IntVar, Button, Label, Frame
+from tkinter import Tk, filedialog, simpledialog, messagebox, Toplevel, Checkbutton, IntVar, Button, Label, Frame, Scale, HORIZONTAL
 from PIL import Image, ImageOps
 from pyzbar.pyzbar import decode, ZBarSymbol
 import cv2
@@ -38,14 +38,16 @@ os.environ['PYTHONWARNINGS'] = 'ignore'
 def select_part_numbers_dialog(part_numbers):
     """Show GUI dialog with checkboxes to select which part numbers to process."""
     if not part_numbers:
-        return None
+        return None, None
     
     selected_parts = []
+    selected_workers = None
+    max_workers = os.cpu_count() or 4
     
     # Create dialog window
     dialog = Toplevel()
-    dialog.title("Select Part Numbers")
-    dialog.geometry("400x400")
+    dialog.title("Select Part Numbers and Workers")
+    dialog.geometry("450x500")
     dialog.resizable(False, False)
     
     # Center the window
@@ -74,18 +76,48 @@ def select_part_numbers_dialog(part_numbers):
         cb.pack(fill="x", pady=2)
         checkbox_vars.append((part, var))
     
+    # Separator
+    separator = Frame(dialog, height=2, bd=1, relief="sunken")
+    separator.pack(fill="x", padx=20, pady=10)
+    
+    # Worker selection frame
+    worker_frame = Frame(dialog)
+    worker_frame.pack(pady=10, padx=20)
+    
+    Label(worker_frame, text="Parallel Workers (CPU Cores):", 
+          font=("Arial", 10, "bold")).pack()
+    
+    # Slider value display
+    worker_value_label = Label(worker_frame, text=f"{max_workers}", 
+                               font=("Arial", 12))
+    worker_value_label.pack(pady=5)
+    
+    def update_worker_label(val):
+        worker_value_label.config(text=f"{int(float(val))}")
+    
+    # Slider
+    worker_slider = Scale(worker_frame, from_=1, to=max_workers, 
+                         orient=HORIZONTAL, length=350,
+                         command=update_worker_label,
+                         showvalue=False, tickinterval=1,
+                         resolution=1)
+    worker_slider.set(max_workers)  # Default to max
+    worker_slider.pack()
+    
     # Button frame
     button_frame = Frame(dialog)
     button_frame.pack(pady=15)
     
     def on_ok():
-        nonlocal selected_parts
+        nonlocal selected_parts, selected_workers
         selected_parts = [part for part, var in checkbox_vars if var.get() == 1]
+        selected_workers = worker_slider.get()
         dialog.destroy()
     
     def on_cancel():
-        nonlocal selected_parts
+        nonlocal selected_parts, selected_workers
         selected_parts = None
+        selected_workers = None
         dialog.destroy()
     
     def select_all():
@@ -107,7 +139,7 @@ def select_part_numbers_dialog(part_numbers):
     dialog.grab_set()
     dialog.wait_window()
     
-    return selected_parts
+    return selected_parts, selected_workers
 
 
 def load_expected_part_numbers(config_file='part_numbers_config.txt'):
@@ -618,9 +650,12 @@ def main():
     root = Tk()
     root.withdraw()
     
+    # Default max workers
+    max_workers = os.cpu_count() or 4
+    
     # If we have expected parts, show selection dialog
     if all_expected_parts:
-        expected_part_numbers = select_part_numbers_dialog(all_expected_parts)
+        expected_part_numbers, max_workers = select_part_numbers_dialog(all_expected_parts)
         if expected_part_numbers is None:
             print("[INFO] Cancelled. Exiting.")
             return
@@ -631,9 +666,11 @@ def main():
         print(f"\n[INFO] Selected {len(expected_part_numbers)} part numbers to process:")
         for part in expected_part_numbers:
             print(f"       - P{part}")
+        print(f"[INFO] Using {max_workers} parallel workers (CPU cores)")
     else:
         expected_part_numbers = None
         print("[INFO] No expected part numbers configured - accepting all part numbers")
+        print(f"[INFO] Using {max_workers} parallel workers (CPU cores)")
     
     input_folder = filedialog.askdirectory(title="Select Folder Containing Images to Sort")
     
@@ -666,8 +703,7 @@ def main():
     print("=" * 80)
     pass1_start = datetime.now()
     
-    # Process images in parallel using all available CPU cores
-    max_workers = os.cpu_count() or 4
+    # Use the max_workers selected by user (or default)
     print(f"[INFO] Using {max_workers} parallel workers (CPU cores)")
     print("=" * 80)
     
@@ -754,8 +790,7 @@ def main():
             # Create a mapping of image_path to result for quick lookup
             result_map = {r['image_path']: r for r in images_needing_ocr}
             
-            # Process images in parallel using all available CPU cores
-            max_workers = os.cpu_count() or 4
+            # Use the same max_workers from Pass 1
             print(f"[INFO] Using {max_workers} parallel workers (CPU cores)")
             print("=" * 80)
             
@@ -900,6 +935,12 @@ def main():
     if interrupted:
         print("[INFO] Processing interrupted by user!")
         print(f"[INFO] Processed and sorted {len(final_results)}/{len(all_results)} images")
+        print(f"[INFO] Total time: {total_duration:.1f}s ({total_duration/60:.1f} minutes)")
+        print(f"[INFO] Finished at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"[INFO] Images organized in: {output_folder}")
+        print("=" * 80)
+        # Force exit when interrupted to release terminal
+        sys.exit(0)
     else:
         print("[INFO] Processing complete!")
     print(f"[INFO] Total time: {total_duration:.1f}s ({total_duration/60:.1f} minutes)")
