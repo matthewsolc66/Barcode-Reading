@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import warnings
+from datetime import datetime
 from tkinter import Tk, filedialog, simpledialog, messagebox
 from PIL import Image, ImageOps
 from pyzbar.pyzbar import decode, ZBarSymbol
@@ -48,7 +49,7 @@ def enhance_for_barcode_reading(image_array):
 def has_required_barcodes(barcodes_found):
     """Check if we have both part number and serial number."""
     has_part = any(re.fullmatch(r'^P\d{4}-\d{5}$', b) for b in barcodes_found)
-    has_serial = any(re.fullmatch(r'^S\d{18}$', b) for b in barcodes_found)
+    has_serial = any(re.fullmatch(r'^S900\d{15}$', b) for b in barcodes_found)
     return has_part and has_serial
 
 
@@ -170,8 +171,8 @@ def extract_text_with_ocr(pil_image, expected_part_number=None):
                     if normalized not in found_codes and re.fullmatch(r'^P\d{4}-\d{5}$', normalized):
                         found_codes.append(normalized)
                 
-                # Extract serial numbers
-                for match in re.findall(r'\d{18}', text):
+                # Extract serial numbers (must start with 900)
+                for match in re.findall(r'900\d{15}', text):
                     normalized = f"S{match}"
                     if normalized not in found_codes:
                         found_codes.append(normalized)
@@ -185,7 +186,7 @@ def classify_barcode(data):
     """Classify barcode based on pattern."""
     if re.fullmatch(r'^P\d{4}-\d{5}$', data):
         return "Part Number"
-    elif re.fullmatch(r'^S\d{18}$', data):
+    elif re.fullmatch(r'^S900\d{15}$', data):
         return "Serial Number"
     elif re.fullmatch(r'^Q\d+$', data):
         return "Quantity"
@@ -232,6 +233,7 @@ def create_folder_structure(base_folder, part_number, serial_number):
 
 def process_image_barcode_only(image_path):
     """Quick barcode scan only - no OCR fallback."""
+    start_time = datetime.now()
     try:
         pil_image = Image.open(image_path)
         pil_image = apply_exif_orientation(pil_image)
@@ -243,7 +245,9 @@ def process_image_barcode_only(image_path):
             'part_number': part_number,
             'serial_number': serial_number,
             'all_barcodes': barcodes,
-            'success': True
+            'success': True,
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'processing_time': (datetime.now() - start_time).total_seconds()
         }
     except Exception as e:
         return {
@@ -252,17 +256,20 @@ def process_image_barcode_only(image_path):
             'serial_number': None,
             'all_barcodes': [],
             'success': False,
-            'error': str(e)
+            'error': str(e),
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'processing_time': (datetime.now() - start_time).total_seconds()
         }
 
 
-def generate_report(results, output_folder):
+def generate_report(results, output_folder, total_time=None):
     """Generate a text report of all processed images."""
     report_path = os.path.join(output_folder, "_sorting_report.txt")
     
     with open(report_path, 'w') as f:
         f.write("=" * 80 + "\n")
         f.write("BARCODE SORTING REPORT\n")
+        f.write(f"Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write("=" * 80 + "\n\n")
         
         total = len(results)
@@ -277,11 +284,15 @@ def generate_report(results, output_folder):
         f.write(f"Images with serial number: {with_serial}\n")
         f.write(f"Images with both: {with_both}\n")
         f.write(f"Unidentified: {total - max(with_part, with_serial)}\n")
+        if total_time:
+            f.write(f"\nTotal processing time: {total_time:.1f}s ({total_time/60:.1f} minutes)\n")
         f.write("\n" + "=" * 80 + "\n\n")
         
         f.write("DETAILED RESULTS:\n\n")
         for result in results:
             f.write(f"Filename: {result['filename']}\n")
+            f.write(f"  Timestamp: {result.get('timestamp', 'N/A')}\n")
+            f.write(f"  Processing Time: {result.get('processing_time', 0):.2f}s\n")
             if result['success']:
                 f.write(f"  Part Number: {result['part_number'] or 'Not found'}\n")
                 f.write(f"  Serial Number: {result['serial_number'] or 'Not found'}\n")
@@ -296,8 +307,10 @@ def generate_report(results, output_folder):
 
 def main():
     """Main function."""
+    script_start_time = datetime.now()
     print("=" * 80)
     print("BARCODE IMAGE SORTER")
+    print(f"Started at: {script_start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 80)
     
     # Select input folder
@@ -360,7 +373,9 @@ def main():
     
     # PASS 1: Quick barcode scanning
     print("\n[INFO] Pass 1: Quick barcode scanning...")
+    print(f"[INFO] Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 80)
+    pass1_start = datetime.now()
     all_results = []
     for idx, image_path in enumerate(image_files, 1):
         print(f"[{idx}/{len(image_files)}] Scanning: {os.path.basename(image_path)}", end=" ")
@@ -369,28 +384,34 @@ def main():
         
         if result['success']:
             if result['part_number'] and result['serial_number']:
-                print(f"✓ Part & Serial")
+                print(f"✓ Part & Serial ({result['processing_time']:.1f}s)")
             elif result['part_number']:
-                print(f"✓ Part only")
+                print(f"✓ Part only ({result['processing_time']:.1f}s)")
             elif result['serial_number']:
-                print(f"✓ Serial only")
+                print(f"✓ Serial only ({result['processing_time']:.1f}s)")
             elif result['all_barcodes']:
-                print(f"⚠ {len(result['all_barcodes'])} barcode(s)")
+                print(f"⚠ {len(result['all_barcodes'])} barcode(s) ({result['processing_time']:.1f}s)")
             else:
-                print(f"⚠ No barcodes")
+                print(f"⚠ No barcodes ({result['processing_time']:.1f}s)")
         else:
-            print(f"✗ Error")
+            print(f"✗ Error ({result['processing_time']:.1f}s)")
     
+    pass1_duration = (datetime.now() - pass1_start).total_seconds()
     print("=" * 80)
+    print(f"[INFO] Pass 1 completed in {pass1_duration:.1f}s ({pass1_duration/60:.1f} minutes)")
+    print(f"[INFO] Finished at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
     # PASS 2: OCR fallback
     images_needing_ocr = [r for r in all_results if not has_required_barcodes(r['all_barcodes'])]
     
     if images_needing_ocr:
         print(f"\n[INFO] Pass 2: OCR fallback for {len(images_needing_ocr)} images...")
+        print(f"[INFO] Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print("=" * 80)
+        pass2_start = datetime.now()
         
         for idx, result in enumerate(images_needing_ocr, 1):
+            ocr_start = datetime.now()
             print(f"[{idx}/{len(images_needing_ocr)}] OCR: {os.path.basename(result['image_path'])}", end=" ")
             
             try:
@@ -398,18 +419,23 @@ def main():
                 pil_image = apply_exif_orientation(pil_image)
                 ocr_codes = extract_text_with_ocr(pil_image, expected_part_number)
                 
+                ocr_time = (datetime.now() - ocr_start).total_seconds()
                 if ocr_codes:
                     for code in ocr_codes:
                         if code not in result['all_barcodes']:
                             result['all_barcodes'].append(code)
                     result['part_number'], result['serial_number'] = extract_identifiers(result['all_barcodes'])
-                    print(f"✓ Found P/S")
+                    print(f"✓ Found P/S ({ocr_time:.1f}s)")
                 else:
-                    print(f"⚠ Nothing found")
+                    print(f"⚠ Nothing found ({ocr_time:.1f}s)")
             except Exception:
-                print(f"✗ Failed")
+                ocr_time = (datetime.now() - ocr_start).total_seconds()
+                print(f"✗ Failed ({ocr_time:.1f}s)")
         
+        pass2_duration = (datetime.now() - pass2_start).total_seconds()
         print("=" * 80)
+        print(f"[INFO] Pass 2 completed in {pass2_duration:.1f}s ({pass2_duration/60:.1f} minutes)")
+        print(f"[INFO] Finished at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     else:
         print("\n[INFO] Pass 2: Skipped (all images have barcodes)")
     
@@ -419,10 +445,13 @@ def main():
     
     # PASS 3: Organize and copy
     print("\n[INFO] Pass 3: Organizing and copying images...")
+    print(f"[INFO] Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 80)
+    pass3_start = datetime.now()
     final_results = []
     
     for idx, result in enumerate(all_results, 1):
+        copy_start = datetime.now()
         print(f"[{idx}/{len(all_results)}] Organizing: {os.path.basename(result['image_path'])}", end=" ")
         
         part_number = result['part_number']
@@ -436,9 +465,12 @@ def main():
         target_folder = create_folder_structure(output_folder, part_number, serial_number)
         target_path = os.path.join(target_folder, os.path.basename(result['image_path']))
         
+        copy_time = (datetime.now() - copy_start).total_seconds()
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
         try:
             shutil.copy2(result['image_path'], target_path)
-            print(f"✓")
+            print(f"✓ ({copy_time:.2f}s)")
             
             final_results.append({
                 'filename': os.path.basename(result['image_path']),
@@ -446,10 +478,12 @@ def main():
                 'serial_number': serial_number,
                 'all_barcodes': result['all_barcodes'],
                 'target_folder': target_folder,
-                'success': True
+                'success': True,
+                'timestamp': timestamp,
+                'processing_time': result.get('processing_time', 0)
             })
         except Exception as e:
-            print(f"✗")
+            print(f"✗ ({copy_time:.2f}s)")
             final_results.append({
                 'filename': os.path.basename(result['image_path']),
                 'part_number': part_number,
@@ -457,15 +491,28 @@ def main():
                 'all_barcodes': result['all_barcodes'],
                 'target_folder': None,
                 'success': False,
-                'error': str(e)
+                'error': str(e),
+                'timestamp': timestamp,
+                'processing_time': result.get('processing_time', 0)
             })
+    
+    pass3_duration = (datetime.now() - pass3_start).total_seconds()
+    print("=" * 80)
+    print(f"[INFO] Pass 3 completed in {pass3_duration:.1f}s ({pass3_duration/60:.1f} minutes)")
+    print(f"[INFO] Finished at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
     # Generate report
     print("\n" + "=" * 80)
-    generate_report(final_results, output_folder)
+    total_duration = (datetime.now() - script_start_time).total_seconds()
+    generate_report(final_results, output_folder, total_duration)
     
-    print("\n[INFO] Processing complete!")
+    # Calculate total time
+    print("\n" + "=" * 80)
+    print("[INFO] Processing complete!")
+    print(f"[INFO] Total time: {total_duration:.1f}s ({total_duration/60:.1f} minutes)")
+    print(f"[INFO] Finished at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"[INFO] Images organized in: {output_folder}")
+    print("=" * 80)
     
     # Open output folder
     try:
@@ -477,6 +524,7 @@ def main():
     messagebox.showinfo(
         "Processing Complete",
         f"Successfully processed {len(final_results)} images!\n\n"
+        f"Total time: {total_duration/60:.1f} minutes\n\n"
         f"Results saved to:\n{output_folder}\n\n"
         f"Check '_sorting_report.txt' for details."
     )
