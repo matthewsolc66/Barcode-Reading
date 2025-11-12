@@ -292,6 +292,105 @@ def correct_ocr_part_number(detected_part, expected_parts):
     return None  # No good match found
 
 
+def correct_ocr_serial_number(detected_serial):
+    """
+    Try to correct OCR errors in serial number using visual similarity.
+    Returns corrected serial number or None if correction doesn't produce valid format.
+    """
+    # Remove S prefix if present
+    if detected_serial.startswith('S'):
+        detected_serial = detected_serial[1:]
+    
+    # Must start with 900 and be 18 digits
+    if not detected_serial.startswith('900') or len(detected_serial) != 18:
+        return None
+    
+    # Common OCR digit substitutions (same as part numbers)
+    ocr_mistakes = {
+        '0': ['8', 'O'],
+        '1': ['7', 'I'],
+        '2': ['Z'],
+        '3': ['8'],
+        '4': ['A'],
+        '5': ['S'],
+        '6': ['8', '5'],
+        '7': ['1'],
+        '8': ['0', '3', '6', 'B'],
+        '9': ['8']
+    }
+    
+    # Try to fix characters one at a time (greedy approach)
+    corrected = list(detected_serial)
+    changes_made = []
+    
+    # Focus on the date code area (positions 10-13: WWYY)
+    # Week must be 01-52, year must be 24 to current_year+1
+    date_code = detected_serial[10:14]
+    week_str = date_code[0:2]
+    year_str = date_code[2:4]
+    
+    # Get valid year range
+    current_year = datetime.now().year % 100
+    min_year = 24
+    max_year = current_year + 1
+    
+    try:
+        week = int(week_str)
+        year = int(year_str)
+        
+        # Try to fix week if invalid
+        if not (1 <= week <= 52):
+            for i, char in enumerate(week_str):
+                for correct_digit in '0123456789':
+                    if char == correct_digit:
+                        continue
+                    # Check if this is a plausible OCR mistake
+                    if char in ocr_mistakes.get(correct_digit, []) or \
+                       correct_digit in ocr_mistakes.get(char, []):
+                        # Try the substitution
+                        test_week = week_str[:i] + correct_digit + week_str[i+1:]
+                        if 1 <= int(test_week) <= 52:
+                            corrected[10+i] = correct_digit
+                            changes_made.append(f"week char {i}: {char}→{correct_digit}")
+                            week_str = test_week
+                            week = int(test_week)
+                            break
+                if 1 <= week <= 52:
+                    break
+        
+        # Try to fix year if invalid
+        if not (min_year <= year <= max_year):
+            for i, char in enumerate(year_str):
+                for correct_digit in '0123456789':
+                    if char == correct_digit:
+                        continue
+                    # Check if this is a plausible OCR mistake
+                    if char in ocr_mistakes.get(correct_digit, []) or \
+                       correct_digit in ocr_mistakes.get(char, []):
+                        # Try the substitution
+                        test_year = year_str[:i] + correct_digit + year_str[i+1:]
+                        if min_year <= int(test_year) <= max_year:
+                            corrected[12+i] = correct_digit
+                            changes_made.append(f"year char {i}: {char}→{correct_digit}")
+                            year_str = test_year
+                            year = int(test_year)
+                            break
+                if min_year <= year <= max_year:
+                    break
+    except ValueError:
+        return None
+    
+    corrected_serial = 'S' + ''.join(corrected)
+    
+    # Validate the corrected serial
+    if is_valid_serial_number(corrected_serial):
+        if changes_made:
+            print(f"       [CORRECTED SERIAL] {detected_serial} → {corrected_serial[1:]} ({', '.join(changes_made)})")
+        return corrected_serial
+    
+    return None
+
+
 def apply_exif_orientation(pil_image):
     """Apply EXIF orientation to correctly orient the image."""
     try:
@@ -483,41 +582,56 @@ def extract_text_with_ocr(pil_image, expected_part_numbers=None):
         cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
     ]
     
-    # OPTIMIZED: Only PSM 6 (removed PSM 11)
+    # PSM modes to try: PSM 6 (block), then PSM 7 (single line) if serial not found
+    psm_modes = [6]
+    
     for img in preprocessed:
-        try:
-            text = pytesseract.image_to_string(Image.fromarray(img), 
-                config=f'--psm 6 -c tessedit_char_whitelist=0123456789-')
-            
-            # Extract part numbers
-            for match in re.findall(r'\d{4}-?\d{5}', text):
-                normalized = match if '-' in match else f"{match[:4]}-{match[4:]}"
+        for psm in psm_modes:
+            try:
+                text = pytesseract.image_to_string(Image.fromarray(img), 
+                    config=f'--psm {psm} -c tessedit_char_whitelist=0123456789-')
                 
-                # Try to correct OCR errors if expected parts provided
-                if expected_part_numbers:
-                    corrected = correct_ocr_part_number(normalized, expected_part_numbers)
-                    if corrected:
-                        normalized = corrected
-                    else:
-                        continue  # Skip if no good match
-                
-                normalized = f"P{normalized}"
-                if normalized not in found_codes and re.fullmatch(r'^P\d{4}-\d{5}$', normalized):
-                    found_codes.append(normalized)
+                # Remove spaces to handle spaced-out OCR results
+                text_no_spaces = text.replace(' ', '')
             
-            # Extract serial numbers (must start with 900 and have valid date code)
-            for match in re.findall(r'900\d{15}', text):
-                normalized = f"S{match}"
-                # Validate serial number before adding
-                if normalized not in found_codes and is_valid_serial_number(normalized):
-                    found_codes.append(normalized)
-            
-            # EARLY EXIT: Stop as soon as we have both part and serial
-            if has_required_barcodes(found_codes):
-                return found_codes
+                # Extract part numbers
+                for match in re.findall(r'\d{4}-?\d{5}', text_no_spaces):
+                    normalized = match if '-' in match else f"{match[:4]}-{match[4:]}"
                 
-        except Exception:
-            continue
+                    # Try to correct OCR errors if expected parts provided
+                    if expected_part_numbers:
+                        corrected = correct_ocr_part_number(normalized, expected_part_numbers)
+                        if corrected:
+                            normalized = corrected
+                        else:
+                            continue  # Skip if no good match
+                
+                    normalized = f"P{normalized}"
+                    if normalized not in found_codes and re.fullmatch(r'^P\d{4}-\d{5}$', normalized):
+                        found_codes.append(normalized)
+            
+                # Extract serial numbers (must start with 900 and have valid date code)
+                for match in re.findall(r'900\d{15}', text_no_spaces):
+                    normalized = f"S{match}"
+                    # First check if valid as-is
+                    if normalized not in found_codes and is_valid_serial_number(normalized):
+                        found_codes.append(normalized)
+                    # If not valid, try fuzzy correction
+                    elif normalized not in found_codes:
+                        corrected = correct_ocr_serial_number(normalized)
+                        if corrected and corrected not in found_codes:
+                            found_codes.append(corrected)
+            
+                # EARLY EXIT: Stop as soon as we have both part and serial
+                if has_required_barcodes(found_codes):
+                    return found_codes
+                
+            except Exception:
+                continue
+        
+        # If no serial found after PSM 6, try PSM 7 for single-line serial detection
+        if not any(code.startswith('S') for code in found_codes) and 7 not in psm_modes:
+            psm_modes.append(7)
     
     return found_codes
 
