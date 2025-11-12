@@ -15,6 +15,7 @@ import shutil
 import warnings
 import signal
 import sys
+import subprocess
 import psutil
 from datetime import datetime
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -37,13 +38,16 @@ os.environ['PYTHONWARNINGS'] = 'ignore'
 
 
 def select_part_numbers_dialog(part_numbers):
-    """Show GUI dialog with checkboxes to select which part numbers to process."""
+    """Show GUI dialog with checkboxes to select which part numbers to process.
+    Returns (selected_parts, selected_workers, mode)
+    where mode is one of: None, 'small_batch', 'ocr_region'.
+    """
     if not part_numbers:
         return None, None, False
     
     selected_parts = []
     selected_workers = None
-    test_mode = False
+    mode = None  # None | 'small_batch' | 'ocr_region'
     
     # Get physical core count (not logical/hyperthreaded)
     try:
@@ -65,7 +69,7 @@ def select_part_numbers_dialog(part_numbers):
     y = (dialog.winfo_screenheight() // 2) - (height // 2)
     dialog.geometry(f'{width}x{height}+{x}+{y}')
     
-    # Top frame for title and test mode button
+    # Top frame for title and quick-action buttons
     top_frame = Frame(dialog)
     top_frame.pack(fill="x", pady=10, padx=20)
     
@@ -74,11 +78,16 @@ def select_part_numbers_dialog(part_numbers):
                        font=("Arial", 11, "bold"))
     title_label.pack(side="left")
     
-    # Test Mode button (right side)
-    test_mode_btn = Button(top_frame, text="Test Mode", 
-                          command=lambda: on_test_mode(),
-                          bg="#2196F3", fg="white", width=10)
-    test_mode_btn.pack(side="right")
+    # Quick actions on the right
+    ocr_test_btn = Button(top_frame, text="OCR Region Test",
+                          command=lambda: on_ocr_region_test(),
+                          bg="#9C27B0", fg="white", width=14)
+    ocr_test_btn.pack(side="right")
+
+    small_batch_btn = Button(top_frame, text="Small Batch Test",
+                             command=lambda: on_small_batch_test(),
+                             bg="#2196F3", fg="white", width=14)
+    small_batch_btn.pack(side="right", padx=6)
     
     # Frame for checkboxes with scrollbar
     checkbox_container = Frame(dialog, height=250)  # Limit height
@@ -154,10 +163,16 @@ def select_part_numbers_dialog(part_numbers):
     button_frame = Frame(dialog)
     button_frame.pack(pady=15)
     
-    def on_test_mode():
-        """Handle Test Mode button click."""
-        nonlocal test_mode
-        test_mode = True
+    def on_small_batch_test():
+        """Handle Small Batch Test button click."""
+        nonlocal mode
+        mode = 'small_batch'
+        dialog.destroy()
+
+    def on_ocr_region_test():
+        """Handle OCR Region Test button click."""
+        nonlocal mode
+        mode = 'ocr_region'
         dialog.destroy()
     
     def on_ok():
@@ -191,7 +206,7 @@ def select_part_numbers_dialog(part_numbers):
     dialog.grab_set()
     dialog.wait_window()
     
-    return selected_parts, selected_workers, test_mode
+    return selected_parts, selected_workers, mode
 
 
 def load_expected_part_numbers(config_file='part_numbers_config.txt'):
@@ -793,9 +808,9 @@ def generate_report(results, output_folder, total_time=None):
 
 
 def run_test_mode(expected_part_numbers):
-    """Run test mode: select 1-10 images and display extracted data without sorting."""
+    """Run small-batch test: select 1-10 images and display extracted data without sorting."""
     print("\n" + "=" * 80)
-    print("TEST MODE - Quick Debug Check")
+    print("SMALL BATCH TEST - Quick Debug Check")
     print("=" * 80)
     
     root = Tk()
@@ -896,8 +911,35 @@ def run_test_mode(expected_part_numbers):
     print(f"  ⚠️  Found only Serial: {found_serial - found_both}")
     print(f"  ❌ Found nothing: {found_nothing}")
     print("=" * 80)
-    print("[INFO] Test mode complete. No files were sorted or moved.")
+    print("[INFO] Small batch test complete. No files were sorted or moved.")
     print("=" * 80)
+
+
+def launch_ocr_region_tester():
+    """Open the OCR Region Tester utility (if available)."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    tester_path = os.path.join(script_dir, 'ocr_region_tester.py')
+    # Prefer direct import so it runs in the same environment
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('ocr_region_tester', tester_path)
+        if spec and spec.loader:
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            if hasattr(mod, 'main'):
+                mod.main()
+                return
+    except Exception:
+        pass
+    
+    # Fallback: spawn a subprocess if import fails
+    if os.path.exists(tester_path):
+        try:
+            subprocess.run([sys.executable, tester_path], check=False)
+        except Exception as e:
+            print(f"[ERROR] Could not launch OCR Region Tester: {e}")
+    else:
+        print("[ERROR] OCR Region Tester script not found next to this script.")
 
 
 def main():
@@ -931,15 +973,19 @@ def main():
     
     # Default max workers
     max_workers = os.cpu_count() or 4
-    test_mode = False
+    selected_mode = None  # None | 'small_batch' | 'ocr_region'
     
     # If we have expected parts, show selection dialog
     if all_expected_parts:
-        expected_part_numbers, max_workers, test_mode = select_part_numbers_dialog(all_expected_parts)
+        expected_part_numbers, max_workers, selected_mode = select_part_numbers_dialog(all_expected_parts)
         
-        # Handle test mode
-        if test_mode:
+        # Handle quick modes
+        if selected_mode == 'small_batch':
             run_test_mode(expected_part_numbers if expected_part_numbers else all_expected_parts)
+            return
+        elif selected_mode == 'ocr_region':
+            print("\n[INFO] Launching OCR Region Tester...")
+            launch_ocr_region_tester()
             return
         
         if expected_part_numbers is None:
