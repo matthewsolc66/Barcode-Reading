@@ -1,10 +1,10 @@
 """
-Barcode Scanner and Image Sorter - Clean Edition
+Barcode Scanner and Image Sorter - RC1 (Release Candidate 1)
 
 Purpose:
-- Same core behavior as the fast version, but with only the code paths we actually use.
-- Retains clear comments explaining each feature.
-- Removes legacy/unused categories and dead branches to reduce size.
+- Production-ready version with all OCR improvements and interactive features.
+- Streamlined codebase with only necessary features.
+- Clear comments explaining each feature.
 
 Key features kept:
 - GUI selection of part numbers with scrollbar + workers slider (uses physical cores)
@@ -593,7 +593,7 @@ def launch_ocr_region_tester():
 def main():
     start = datetime.now()
     print("=" * 80)
-    print("BARCODE IMAGE SORTER - CLEAN EDITION")
+    print("BARCODE IMAGE SORTER - RC1")
     print(f"Started at: {start.strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 80)
     print("[INFO] Press Ctrl+C to stop early; processed images will still be sorted")
