@@ -124,24 +124,25 @@ def main():
     print("  - Press 'q' to quit")
     print("=" * 40)
     
-    while True:
-        cv2.imshow('OCR Region Tester', display_image)
-        key = cv2.waitKey(1) & 0xFF
-        
-        # Quit
-        if key == ord('q'):
-            break
-        
-        # Reset selection
-        elif key == ord('r'):
-            ix, iy, fx, fy = -1, -1, -1, -1
-            display_image = image_copy.copy()
+    try:
+        while True:
             cv2.imshow('OCR Region Tester', display_image)
-            print("\nSelection reset.")
-        
-        # Run OCR on selected region
-        elif key == 13:  # Enter key
-            if ix >= 0 and iy >= 0 and fx >= 0 and fy >= 0:
+            key = cv2.waitKey(1) & 0xFF
+            
+            # Quit
+            if key == ord('q') or key == 27:  # 'q' or ESC
+                break
+            
+            # Reset selection
+            elif key == ord('r'):
+                ix, iy, fx, fy = -1, -1, -1, -1
+                display_image = image_copy.copy()
+                cv2.imshow('OCR Region Tester', display_image)
+                print("\nSelection reset.")
+            
+            # Run OCR on selected region
+            elif key == 13:  # Enter key
+                if ix >= 0 and iy >= 0 and fx >= 0 and fy >= 0:
                 # Ensure coordinates are in correct order
                 x1, x2 = min(ix, fx), max(ix, fx)
                 y1, y2 = min(iy, fy), max(iy, fy)
@@ -196,9 +197,11 @@ def main():
                 cv2.imshow('Selected Region', roi)
             else:
                 print("\nNo region selected! Click and drag to select an area first.")
-    
-    cv2.destroyAllWindows()
-    print("\nExiting.")
+    except KeyboardInterrupt:
+        print("\n[INFO] Ctrl+C detected. Closing windows...")
+    finally:
+        cv2.destroyAllWindows()
+        print("\nExiting.")
 
 
 if __name__ == "__main__":
