@@ -59,14 +59,15 @@ def select_part_numbers_dialog(part_numbers):
     if not part_numbers:
         return None, None, None
 
-    selected_parts = []
-    mode = None
-
     # Use physical cores for default maximum workers
     try:
         max_workers = psutil.cpu_count(logical=False) or (os.cpu_count() or 4)
     except Exception:
         max_workers = os.cpu_count() or 4
+
+    selected_parts = []
+    mode = None
+    selected_workers = max_workers
 
     dialog = Toplevel()
     dialog.title("Select Parts and Options")
@@ -79,10 +80,9 @@ def select_part_numbers_dialog(part_numbers):
     y = (dialog.winfo_screenheight() // 2) - (dialog.winfo_height() // 2)
     dialog.geometry(f"{dialog.winfo_width()}x{dialog.winfo_height()}+{x}+{y}")
 
-    # Top: title + quick actions
-    top = Frame(dialog)
-    top.pack(fill="x", pady=10, padx=20)
-    Label(top, text="Select which part numbers to process:", font=("Arial", 11, "bold")).pack(side="left")
+    # Quick action buttons at the top right
+    button_row = Frame(dialog)
+    button_row.pack(fill="x", pady=(10, 5), padx=20)
 
     def on_small_batch():
         nonlocal mode
@@ -94,8 +94,13 @@ def select_part_numbers_dialog(part_numbers):
         mode = "ocr_region"
         dialog.destroy()
 
-    Button(top, text="OCR Region Test", command=on_ocr_region, bg="#9C27B0", fg="white", width=14).pack(side="right")
-    Button(top, text="Small Batch Test", command=on_small_batch, bg="#2196F3", fg="white", width=14).pack(side="right", padx=6)
+    Button(button_row, text="Small Batch Test", command=on_small_batch, bg="#2196F3", fg="white", width=14).pack(side="right", padx=3)
+    Button(button_row, text="OCR Region Test", command=on_ocr_region, bg="#9C27B0", fg="white", width=14).pack(side="right", padx=3)
+
+    # Title below the buttons
+    title_frame = Frame(dialog)
+    title_frame.pack(fill="x", pady=(5, 10), padx=20)
+    Label(title_frame, text="Select which part numbers to process:", font=("Arial", 11, "bold")).pack(anchor="w")
 
     # Checkbox list with scrollbar
     container = Frame(dialog, height=250)
@@ -123,7 +128,18 @@ def select_part_numbers_dialog(part_numbers):
     box.bind("<Configure>", cfg_scroll)
     canvas.bind("<Configure>", cfg_scroll)
 
-    # Workers
+    # Select/Deselect buttons directly below checkbox list
+    def sel_all():
+        for _, v in checkbox_vars: v.set(1)
+    def desel_all():
+        for _, v in checkbox_vars: v.set(0)
+    
+    select_btns = Frame(dialog)
+    select_btns.pack(pady=10)
+    Button(select_btns, text="Select All", width=12, command=sel_all).pack(side="left", padx=5)
+    Button(select_btns, text="Deselect All", width=12, command=desel_all).pack(side="left", padx=5)
+
+    # Workers section
     workers_frame = Frame(dialog)
     workers_frame.pack(pady=10)
     Label(workers_frame, text="Parallel Workers:", font=("Arial", 10, "bold")).pack()
@@ -131,17 +147,36 @@ def select_part_numbers_dialog(part_numbers):
     workers_label = Label(workers_frame, text=f"{max_workers}", font=("Arial", 12))
     workers_label.pack(pady=4)
     def _upd(val): workers_label.config(text=f"{int(float(val))}")
-    slider = Scale(workers_frame, from_=1, to=max_workers, orient=HORIZONTAL, length=350, showvalue=False, command=_upd)
+    slider = Scale(workers_frame, from_=1, to=max_workers, orient=HORIZONTAL, length=350, 
+                   showvalue=False, command=_upd, tickinterval=1, resolution=1)
     slider.set(max_workers)
+    
+    # Make clicking/dragging on the trough snap to that position (and prevent auto-repeat to min/max)
+    def _set_from_x(x):
+        length = max(1, slider.winfo_width())
+        raw = (x / length) * (max_workers - 1) + 1  # Map to [1, max_workers]
+        value = int(round(raw))
+        value = 1 if value < 1 else (max_workers if value > max_workers else value)
+        slider.set(value)
+        _upd(value)
+
+    def on_trough_click(event):
+        _set_from_x(event.x)
+        return "break"  # stop default auto-repeat behavior
+
+    def on_trough_drag(event):
+        _set_from_x(event.x)
+        return "break"
+
+    slider.bind("<Button-1>", on_trough_click)
+    slider.bind("<B1-Motion>", on_trough_drag)
     slider.pack()
 
-    # Bottom buttons
-    btns = Frame(dialog)
-    btns.pack(pady=12)
-
+    # OK/Cancel buttons centered at the bottom
     def on_ok():
-        nonlocal selected_parts
+        nonlocal selected_parts, selected_workers
         selected_parts = [p for p, v in checkbox_vars if v.get() == 1]
+        selected_workers = slider.get()
         dialog.destroy()
 
     def on_cancel():
@@ -149,21 +184,16 @@ def select_part_numbers_dialog(part_numbers):
         selected_parts = None
         dialog.destroy()
 
-    def sel_all():
-        for _, v in checkbox_vars: v.set(1)
-    def desel_all():
-        for _, v in checkbox_vars: v.set(0)
-
-    Button(btns, text="Select All", width=12, command=sel_all).pack(side="left", padx=5)
-    Button(btns, text="Deselect All", width=12, command=desel_all).pack(side="left", padx=5)
-    Button(btns, text="OK", width=12, bg="#4CAF50", fg="white", command=on_ok).pack(side="left", padx=5)
-    Button(btns, text="Cancel", width=12, command=on_cancel).pack(side="left", padx=5)
+    btns = Frame(dialog)
+    btns.pack(pady=15)
+    Button(btns, text="OK", width=15, bg="#4CAF50", fg="white", command=on_ok).pack(side="left", padx=5)
+    Button(btns, text="Cancel", width=15, bg="#f44336", fg="white", command=on_cancel).pack(side="left", padx=5)
 
     dialog.transient()
     dialog.grab_set()
     dialog.wait_window()
 
-    return selected_parts, slider.get(), mode
+    return selected_parts, selected_workers, mode
 
 
 def load_expected_part_numbers(config_file='part_numbers_config.txt'):
@@ -646,6 +676,7 @@ def main():
     if not files:
         print("[ERROR] No image files found")
         return
+    print(f"\n[INFO] Found {len(files)} image(s) in: {input_dir}")
 
     # Pass 1
     print("\n[INFO] Pass 1: Quick barcode scanning (parallel)…")
@@ -657,7 +688,17 @@ def main():
         for fut in as_completed(fut2path):
             if interrupted:
                 print("\n[INFO] Stopping Pass 1 early…")
+                # Cancel anything pending and stop waiting
                 executor.shutdown(wait=False, cancel_futures=True)
+                # Drain any futures that already finished but haven't been recorded yet
+                for f, pth in fut2path.items():
+                    if f.done():
+                        try:
+                            r = f.result()
+                            if r not in all_results:
+                                all_results.append(r)
+                        except Exception:
+                            pass
                 break
             completed += 1
             path = fut2path[fut]
@@ -691,6 +732,19 @@ def main():
                 if interrupted:
                     print("\n[INFO] Stopping Pass 2 early…")
                     executor2.shutdown(wait=False, cancel_futures=True)
+                    # Drain finished futures and attach any OCR results we already have
+                    for f, pth in fut2path.items():
+                        if f.done():
+                            try:
+                                o = f.result(); codes = o.get('ocr_codes', [])
+                                base = next((r for r in all_results if r['image_path'] == pth), None)
+                                if base is not None and codes:
+                                    for c in codes:
+                                        if c not in base['all_barcodes']:
+                                            base['all_barcodes'].append(c)
+                                    base['part_number'], base['serial_number'] = extract_identifiers(base['all_barcodes'])
+                            except Exception:
+                                pass
                     break
                 completed += 1
                 p = fut2path[fut]
@@ -722,9 +776,6 @@ def main():
     final = []
     try:
         for i, r in enumerate(all_results, 1):
-            if interrupted:
-                print(f"[INFO] Stopping Pass 3 early at {i}/{len(all_results)}…")
-                break
             t = datetime.now()
             target = create_folder_structure(out_dir, r['part_number'], r['serial_number'])
             dest = os.path.join(target, os.path.basename(r['image_path']))
@@ -765,11 +816,16 @@ def main():
     generate_report(final, out_dir, total_time)
 
     # Try to open the output folder (Windows)
-    try:
-        os.startfile(out_dir)
-    except Exception:
-        pass
-    messagebox.showinfo("Processing Complete", f"Processed {len(final)} images. Results saved to:\n{out_dir}")
+    if not interrupted:
+        try:
+            os.startfile(out_dir)
+        except Exception:
+            pass
+        messagebox.showinfo("Processing Complete", f"Processed {len(final)} images. Results saved to:\n{out_dir}")
+    else:
+        # On interrupt, exit immediately after writing report to free the terminal faster
+        print("[INFO] Exiting immediately due to Ctrl+C (report already written).")
+        sys.exit(0)
 
 
 if __name__ == "__main__":
