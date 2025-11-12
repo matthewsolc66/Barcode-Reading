@@ -143,60 +143,60 @@ def main():
             # Run OCR on selected region
             elif key == 13:  # Enter key
                 if ix >= 0 and iy >= 0 and fx >= 0 and fy >= 0:
-                # Ensure coordinates are in correct order
-                x1, x2 = min(ix, fx), max(ix, fx)
-                y1, y2 = min(iy, fy), max(iy, fy)
-                
-                if x2 - x1 < 5 or y2 - y1 < 5:
-                    print("\nRegion too small! Please select a larger area.")
-                    continue
-                
-                # Map display coordinates back to original image coordinates
-                orig_x1 = int(x1 * scale_x)
-                orig_x2 = int(x2 * scale_x)
-                orig_y1 = int(y1 * scale_y)
-                orig_y2 = int(y2 * scale_y)
-                
-                # Crop the region from original image
-                roi = original_image[orig_y1:orig_y2, orig_x1:orig_x2]
-                
-                # Convert to PIL Image for pytesseract
-                roi_rgb = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
-                pil_image = Image.fromarray(roi_rgb)
-                
-                print("\n" + "=" * 60)
-                print(f"Selected region (display): ({x1}, {y1}) to ({x2}, {y2})")
-                print(f"Original image region: ({orig_x1}, {orig_y1}) to ({orig_x2}, {orig_y2})")
-                print(f"Region size: {orig_x2-orig_x1} x {orig_y2-orig_y1} pixels")
-                print("-" * 60)
-                
-                # Run OCR with different configurations
-                configs = [
-                    ('Default', '--psm 6'),
-                    ('Single line', '--psm 7'),
-                    ('Single word', '--psm 8'),
-                    ('Digits only', '--psm 6 -c tessedit_char_whitelist=0123456789'),
-                    ('Digits and dash', '--psm 6 -c tessedit_char_whitelist=0123456789-'),
-                ]
-                
-                for config_name, config_str in configs:
-                    try:
-                        text = pytesseract.image_to_string(pil_image, config=config_str).strip()
-                        print(f"\n{config_name}:")
-                        if text:
-                            print(f"  '{text}'")
-                            print(f"  Raw: {repr(text)}")
-                        else:
-                            print("  (no text detected)")
-                    except Exception as e:
-                        print(f"  Error: {e}")
-                
-                print("=" * 60)
-                
-                # Show the cropped region in a separate window
-                cv2.imshow('Selected Region', roi)
-            else:
-                print("\nNo region selected! Click and drag to select an area first.")
+                    # Ensure coordinates are in correct order
+                    x1, x2 = min(ix, fx), max(ix, fx)
+                    y1, y2 = min(iy, fy), max(iy, fy)
+                    
+                    if x2 - x1 < 5 or y2 - y1 < 5:
+                        print("\nRegion too small! Please select a larger area.")
+                        continue
+                    
+                    # Map display coordinates back to original image coordinates
+                    orig_x1 = int(x1 * scale_x)
+                    orig_x2 = int(x2 * scale_x)
+                    orig_y1 = int(y1 * scale_y)
+                    orig_y2 = int(y2 * scale_y)
+                    
+                    # Crop the region from original image
+                    roi = original_image[orig_y1:orig_y2, orig_x1:orig_x2]
+                    
+                    # Convert to PIL Image for pytesseract
+                    roi_rgb = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
+                    pil_image = Image.fromarray(roi_rgb)
+                    
+                    print("\n" + "=" * 60)
+                    print(f"Selected region (display): ({x1}, {y1}) to ({x2}, {y2})")
+                    print(f"Original image region: ({orig_x1}, {orig_y1}) to ({orig_x2}, {orig_y2})")
+                    print(f"Region size: {orig_x2-orig_x1} x {orig_y2-orig_y1} pixels")
+                    print("-" * 60)
+                    
+                    # Run OCR with different configurations
+                    configs = [
+                        ('Default', '--psm 6'),
+                        ('Single line', '--psm 7'),
+                        ('Single word', '--psm 8'),
+                        ('Digits only', '--psm 6 -c tessedit_char_whitelist=0123456789'),
+                        ('Digits and dash', '--psm 6 -c tessedit_char_whitelist=0123456789-'),
+                    ]
+                    
+                    for config_name, config_str in configs:
+                        try:
+                            text = pytesseract.image_to_string(pil_image, config=config_str).strip()
+                            print(f"\n{config_name}:")
+                            if text:
+                                print(f"  '{text}'")
+                                print(f"  Raw: {repr(text)}")
+                            else:
+                                print("  (no text detected)")
+                        except Exception as e:
+                            print(f"  Error: {e}")
+                    
+                    print("=" * 60)
+                    
+                    # Show the cropped region in a separate window
+                    cv2.imshow('Selected Region', roi)
+                else:
+                    print("\nNo region selected! Click and drag to select an area first.")
     except KeyboardInterrupt:
         print("\n[INFO] Ctrl+C detected. Closing windows...")
     finally:

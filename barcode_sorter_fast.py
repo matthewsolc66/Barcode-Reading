@@ -301,7 +301,8 @@ def correct_ocr_part_number(detected_part, expected_parts):
     
     if best_match:
         if best_match != detected_part:
-            print(f"       [CORRECTED] {detected_part} → {best_match}")
+            # Include the P prefix in the log for clarity
+            print(f"       [CORRECTED PART] P{detected_part} → P{best_match}")
         return best_match
     
     return None  # No good match found
@@ -400,7 +401,8 @@ def correct_ocr_serial_number(detected_serial):
     # Validate the corrected serial
     if is_valid_serial_number(corrected_serial):
         if changes_made:
-            print(f"       [CORRECTED SERIAL] {detected_serial} → {corrected_serial[1:]} ({', '.join(changes_made)})")
+            # Show the S prefix on both sides for consistency
+            print(f"       [CORRECTED SERIAL] S{detected_serial} → {corrected_serial} ({', '.join(changes_made)})")
         return corrected_serial
     
     return None
