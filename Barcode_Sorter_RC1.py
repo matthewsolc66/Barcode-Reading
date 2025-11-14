@@ -20,6 +20,7 @@ Dependencies: Pillow, pyzbar, OpenCV, numpy, pytesseract, psutil, tkinter
 """
 
 import os
+import io
 import re
 import shutil
 import warnings
@@ -50,6 +51,12 @@ warnings.filterwarnings('ignore')
 os.environ['PYTHONWARNINGS'] = 'ignore'
 
 
+# -------------------------- Debug toggles ---------------------------
+# Set to True to save ROI overlays and zoom crops for Pass 1 verification
+DEBUG_ZOOM_ROI = True
+DEBUG_ZOOM_DIR = None  # Will be set to output_dir/_zoom_debug when output_dir is known
+
+
 # ------------------------------ UI ---------------------------------
 
 def select_part_numbers_dialog(part_numbers):
@@ -67,7 +74,8 @@ def select_part_numbers_dialog(part_numbers):
 
     selected_parts = []
     mode = None
-    selected_workers = max_workers
+    # Default to 1/2 of max workers, at least 1
+    selected_workers = max(1, int(max_workers * 0.5))
 
     dialog = Toplevel()
     dialog.title("Select Parts and Options")
@@ -144,12 +152,13 @@ def select_part_numbers_dialog(part_numbers):
     workers_frame.pack(pady=10)
     Label(workers_frame, text="Parallel Workers:", font=("Arial", 10, "bold")).pack()
     Label(workers_frame, text=f"(Physical CPU cores: {max_workers})", font=("Arial", 8), fg="gray").pack()
-    workers_label = Label(workers_frame, text=f"{max_workers}", font=("Arial", 12))
+    workers_label = Label(workers_frame, text=f"{selected_workers}", font=("Arial", 12))
     workers_label.pack(pady=4)
     def _upd(val): workers_label.config(text=f"{int(float(val))}")
     slider = Scale(workers_frame, from_=1, to=max_workers, orient=HORIZONTAL, length=350, 
                    showvalue=False, command=_upd, tickinterval=1, resolution=1)
-    slider.set(max_workers)
+    slider.set(selected_workers)
+    _upd(selected_workers)
     
     # Make clicking/dragging on the trough snap to that position (and prevent auto-repeat to min/max)
     def _set_from_x(x):
@@ -260,78 +269,435 @@ def has_required_barcodes(barcodes_found):
     return has_part and has_serial
 
 
-def decode_barcodes(pil_image):
+def decode_barcodes(pil_image, debug_name: str | None = None):
     """Multi-try Code 128 decode with early exits + limited zoom retries."""
+    if DEBUG_ZOOM_ROI and debug_name:
+        print(f"[DEBUG] Processing {debug_name} with debug enabled")
+    
     found = []
+    union_images: list[np.ndarray] = []  # in-memory zoom-union crops (grayscale, 8-bit)
     regions = []
+    barcodes = []  # list of tuples (data, rect, polygon_points)
     arr = np.array(pil_image)
     gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY) if len(arr.shape) == 3 else arr
 
-    def _collect(objs):
+    def _collect(objs, M_inv=None, record_regions=True):
+        from types import SimpleNamespace
+        H, W = arr.shape[0], arr.shape[1]
+
+        def _aff_apply(M, px, py):
+            if M is None:
+                return float(px), float(py)
+            x0 = float(M[0,0]) * px + float(M[0,1]) * py + float(M[0,2])
+            y0 = float(M[1,0]) * px + float(M[1,1]) * py + float(M[1,2])
+            return x0, y0
+
         for bc in objs:
             data = bc.data.decode('utf-8')
+            # Prefer polygon bounds if available for a fuller region; fall back to rect
+            x = getattr(bc, 'rect', None).left if hasattr(bc, 'rect') else 0
+            y = getattr(bc, 'rect', None).top if hasattr(bc, 'rect') else 0
+            w = getattr(bc, 'rect', None).width if hasattr(bc, 'rect') else 0
+            h = getattr(bc, 'rect', None).height if hasattr(bc, 'rect') else 0
+            poly = getattr(bc, 'polygon', None)
+            poly_pts = None
+            if poly and len(poly) >= 3:
+                try:
+                    # Transform polygon back to original image if needed
+                    tpts = []
+                    for p in poly:
+                        tx, ty = _aff_apply(M_inv, float(p.x), float(p.y))
+                        tpts.append((tx, ty))
+                    poly_pts = [(int(round(px)), int(round(py))) for px, py in tpts]
+                    xs = [px for px, _ in tpts]
+                    ys = [py for _, py in tpts]
+                    x = max(0, int(round(min(xs))))
+                    y = max(0, int(round(min(ys))))
+                    w = int(round(min(W - x, max(xs) - min(xs))))
+                    h = int(round(min(H - y, max(ys) - min(ys))))
+                except Exception:
+                    pass
+            # Inflate region a bit to better cover the whole barcode
+            if w <= 0 or h <= 0:
+                # Fallback: transform rect corners if polygon not available
+                cx1, cy1 = _aff_apply(M_inv, x, y)
+                cx2, cy2 = _aff_apply(M_inv, x + w, y)
+                cx3, cy3 = _aff_apply(M_inv, x + w, y + h)
+                cx4, cy4 = _aff_apply(M_inv, x, y + h)
+                xs = [cx1, cx2, cx3, cx4]
+                ys = [cy1, cy2, cy3, cy4]
+                x = max(0, int(round(min(xs))))
+                y = max(0, int(round(min(ys))))
+                w = int(round(min(W - x, max(xs) - min(xs))))
+                h = int(round(min(H - y, max(ys) - min(ys))))
+
+            infx = int(max(6, w * 0.2))
+            infy = int(max(6, h * 0.35))
+            x = max(0, x - infx)
+            y = max(0, y - infy)
+            w = min(W - x, w + 2 * infx)
+            h = min(H - y, h + 2 * infy)
+            rect = SimpleNamespace(left=int(x), top=int(y), width=int(w), height=int(h))
             if data not in found:
                 found.append(data)
-            if bc.rect not in regions:
-                regions.append(bc.rect)
+            if record_regions:
+                # Avoid duplicates by simple overlap check
+                dup = False
+                for r in regions:
+                    if abs(r.left - rect.left) < 3 and abs(r.top - rect.top) < 3 and abs(r.width - rect.width) < 5 and abs(r.height - rect.height) < 5:
+                        dup = True; break
+                if not dup:
+                    regions.append(rect)
+                    barcodes.append((data, rect, poly_pts))
+    
+    def _save_debug_overlay():
+        """Save debug overlay showing detected barcode regions.
+        - Thin blue lines: Raw ZBar polygon detections (exact decode regions)
+        - Thick green boxes: Inflated regions we actually use for zoom crops
+        - Yellow union box: Combined region per unique barcode value
+        Only saved when required P/S not yet found.
+        """
+        if DEBUG_ZOOM_ROI and DEBUG_ZOOM_DIR and debug_name and regions and not has_required_barcodes(found):
+            print(f"[DEBUG] {debug_name}: Found {len(regions)} barcode region(s), saving overlay...")
+            try:
+                overlay = cv2.cvtColor(arr.copy(), cv2.COLOR_RGB2BGR)
+                H, W = arr.shape[0], arr.shape[1]
+                
+                # First, draw all ZBar polygon outlines (thin blue) to show exact tiny detection regions
+                for data, r, poly_pts in barcodes:
+                    if poly_pts and len(poly_pts) >= 3:
+                        pts = np.array(poly_pts, dtype=np.int32)
+                        cv2.polylines(overlay, [pts], isClosed=True, color=(255, 100, 0), thickness=1)
+                
+                # Draw the inflated rectangles (thick green) - these are what we use for zoom crops
+                for data, r, poly_pts in barcodes:
+                    x, y, w, h = r.left, r.top, r.width, r.height
+                    cv2.rectangle(overlay, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                
+                # Group by decoded data and draw union boxes (yellow) to show logical grouping
+                groups: dict[str, list] = {}
+                for data, r, poly_pts in barcodes:
+                    groups.setdefault(data, []).append(r)
+
+                color = (0, 255, 255)
+                idx = 0
+                for data, rects in groups.items():
+                    if len(rects) > 1:  # Only draw union if multiple regions for same code
+                        lx = min(r.left for r in rects)
+                        ty = min(r.top for r in rects)
+                        rx = max(r.left + r.width for r in rects)
+                        by = max(r.top + r.height for r in rects)
+                        lx, ty, rx, by = int(lx), int(ty), int(rx), int(by)
+                        cv2.rectangle(overlay, (lx, ty), (rx, by), color, 3)
+                    
+                    # Label with index and data preview
+                    first_rect = rects[0]
+                    label_x = first_rect.left
+                    label_y = max(0, first_rect.top - 5)
+                    label = f"R{idx}: {data[:12]}" + ('…' if len(data) > 12 else '')
+                    cv2.putText(overlay, label, (label_x, label_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
+                    idx += 1
+
+                overlay_path = os.path.join(DEBUG_ZOOM_DIR, f"{os.path.splitext(debug_name)[0]}_regions.png")
+                cv2.imwrite(overlay_path, overlay)
+                print(f"[DEBUG] Saved region overlay: {os.path.basename(overlay_path)}")
+            except Exception as ex:
+                print(f"[DEBUG WARNING] Failed to save region overlay: {ex}")
 
     _collect(decode(pil_image, symbols=[ZBarSymbol.CODE128]))
     if has_required_barcodes(found):
-        return found
+        return found, union_images
 
     # Deglare
     _, glare = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY)
     glare = cv2.dilate(glare, np.ones((3, 3), np.uint8), 1)
     _collect(decode(Image.fromarray(cv2.inpaint(gray, glare, 3, cv2.INPAINT_TELEA)), symbols=[ZBarSymbol.CODE128]))
     if has_required_barcodes(found):
-        return found
+        return found, union_images
 
     # CLAHE
     enh = enhance_for_barcode_reading(arr)
     _collect(decode(Image.fromarray(enh), symbols=[ZBarSymbol.CODE128]))
     if has_required_barcodes(found):
-        return found
+        return found, union_images
 
     # Otsu
     _, bin_img = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     _collect(decode(Image.fromarray(bin_img), symbols=[ZBarSymbol.CODE128]))
     if has_required_barcodes(found):
-        return found
+        return found, union_images
 
     # Adaptive
     for blk in [11, 21, 51]:
         adap = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, blk, 10)
         _collect(decode(Image.fromarray(adap), symbols=[ZBarSymbol.CODE128]))
         if has_required_barcodes(found):
-            return found
+            return found, union_images
 
     # Invert
     _collect(decode(Image.fromarray(cv2.bitwise_not(bin_img)), symbols=[ZBarSymbol.CODE128]))
     if has_required_barcodes(found):
-        return found
+        _save_debug_overlay()
+        return found, union_images
 
     # Morph close
     morph = cv2.morphologyEx(bin_img, cv2.MORPH_CLOSE, np.ones((2, 2), np.uint8))
     _collect(decode(Image.fromarray(morph), symbols=[ZBarSymbol.CODE128]))
     if has_required_barcodes(found):
-        return found
+        return found, union_images
+
+    # Rotation retries if we found barcodes but missing P/S
+    if not has_required_barcodes(found) and found:
+        # Try rotating ±7°, ±14°, ±21° to handle tilted labels
+        for angle in [7, -7, 14, -14, 21, -21]:
+            h, w = arr.shape[:2]
+            center = (w // 2, h // 2)
+            M = cv2.getRotationMatrix2D(center, angle, 1.0)
+            rotated = cv2.warpAffine(arr, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+            rotated_pil = Image.fromarray(rotated)
+            M_inv = cv2.invertAffineTransform(M)
+            _collect(decode(rotated_pil, symbols=[ZBarSymbol.CODE128]), M_inv=M_inv, record_regions=True)
+            if has_required_barcodes(found):
+                return found, union_images
+            # Try enhanced version too
+            rotated_gray = cv2.cvtColor(rotated, cv2.COLOR_RGB2GRAY) if len(rotated.shape) == 3 else rotated
+            rotated_enh = enhance_for_barcode_reading(rotated)
+            _collect(decode(Image.fromarray(rotated_enh), symbols=[ZBarSymbol.CODE128]), M_inv=M_inv, record_regions=True)
+            if has_required_barcodes(found):
+                return found, union_images
+
+    # Save debug overlay before zoom attempts (only if P/S not found yet)
+    if DEBUG_ZOOM_ROI and debug_name:
+        if regions:
+            _save_debug_overlay()
+        else:
+            print(f"[DEBUG] {debug_name}: No barcode regions detected in initial passes")
 
     # Zoom retries on first few regions
     if regions and not has_required_barcodes(found):
-        for r in regions[:5]:
-            x, y, w, h = r.left, r.top, r.width, r.height
-            xf, yf = int(w * .5), int(h * .5)
-            x1, y1 = max(0, x - xf), max(0, y - yf)
-            x2, y2 = min(gray.shape[1], x + w + xf), min(gray.shape[0], y + h + yf)
-            crop = gray[y1:y2, x1:x2]
-            if crop.size == 0:
-                continue
-            zoom = cv2.resize(crop, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
-            for z in [zoom, cv2.threshold(zoom, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1], enhance_for_barcode_reading(zoom)]:
-                _collect(decode(Image.fromarray(z), symbols=[ZBarSymbol.CODE128]))
-                if has_required_barcodes(found):
-                    return found
-    return found
+        # Calculate union rectangle based on per-code grouping ("yellow" boxes)
+        groups: dict[str, list] = {}
+        for data, r, poly_pts in barcodes:
+            groups.setdefault(data, []).append(r)
+        if groups:
+            best = None  # (area, (min_x, min_y, max_x, max_y), data)
+            for data, rects in groups.items():
+                gx1 = min(rr.left for rr in rects)
+                gy1 = min(rr.top for rr in rects)
+                gx2 = max(rr.left + rr.width for rr in rects)
+                gy2 = max(rr.top + rr.height for rr in rects)
+                area = max(1, (gx2 - gx1)) * max(1, (gy2 - gy1))
+                if best is None or area > best[0]:
+                    best = (area, (gx1, gy1, gx2, gy2), data)
+            (min_x, min_y, max_x, max_y) = best[1]
+            if DEBUG_ZOOM_ROI and debug_name:
+                try:
+                    print(f"[DEBUG] Using group-union for zoom: '{best[2]}' area={best[0]} bbox=({min_x},{min_y})-({max_x},{max_y})")
+                except Exception:
+                    pass
+        else:
+            # Fallback to union of all green boxes
+            min_x = min(r.left for r in regions)
+            min_y = min(r.top for r in regions)
+            max_x = max(r.left + r.width for r in regions)
+            max_y = max(r.top + r.height for r in regions)
+        
+        # Build anchor-aware union crop fitted to 3:2 aspect
+        base_w = max_x - min_x
+        base_h = max_y - min_y
+        pad_w = int(base_w * 0.85)
+        pad_h = int(base_h * 1.5)
+        target_aspect = 3.0 / 2.0
+
+        img_h, img_w = gray.shape[:2]
+
+        # Find rects for specific labels using decoded data->rect mapping
+        def find_rect(predicate):
+            for data, r, poly_pts in barcodes:
+                u = data.upper()
+                if predicate(u):
+                    return r
+            return None
+
+        qty_rect = find_rect(lambda s: s.startswith('Q') or 'QTY' in s)
+        lot_rect = find_rect(lambda s: '1T' in s or 'LOT' in s)
+        origin_rect = find_rect(lambda s: s.startswith('4L') or 'ORIGIN' in s)
+        pn_rect = find_rect(lambda s: s.startswith('P') and re.match(r'^P\d{4}-\d{5}$', s))
+        sn_rect = find_rect(lambda s: s.startswith('S') and re.match(r'^S900\d{15}$', s))
+
+        # Compute target w/h based on chosen union plus padding, adjusted to 3:2
+        # Minimum dimensions: 750px wide x 500px tall
+        w = max(750, int((base_w + 2 * pad_w) * 1.15))
+        h = max(500, int((base_h + 2 * pad_h) * 1.15))
+        if w / max(1, h) < target_aspect:
+            w = int(h * target_aspect)
+        else:
+            h = int(w / target_aspect)
+        # Ensure minimums are still met after aspect ratio adjustment
+        if w < 750:
+            w = 750
+            h = int(w / target_aspect)
+        if h < 500:
+            h = 500
+            w = int(h * target_aspect)
+
+        def clamp(val, lo, hi):
+            return max(lo, min(hi, val))
+
+        # Anchoring strategies - use specific anchor if only 1 barcode, otherwise loosely follow while ensuring all regions fit
+        single_barcode = len(barcodes) == 1
+        
+        if qty_rect is not None:
+            # align QTY barcode near bottom-left with some padding below
+            x1 = max(0, qty_rect.left - int(w * 0.05))  # Small left padding
+            y2 = min(img_h, qty_rect.top + qty_rect.height + int(h * 0.1))  # Add padding below
+            x2 = x1 + w
+            y1 = y2 - h
+            if x2 > img_w:
+                shift = x2 - img_w
+                x1 -= shift; x2 -= shift
+            if y1 < 0:
+                y1 = 0; y2 = h
+        elif lot_rect is not None:
+            # align LOT barcode to left edge mid-height
+            x1 = lot_rect.left
+            x2 = x1 + w
+            y_center = lot_rect.top + lot_rect.height // 2
+            y1 = int(y_center - h / 2)
+            y2 = y1 + h
+            if x2 > img_w:
+                shift = x2 - img_w
+                x1 -= shift; x2 -= shift
+            if y1 < 0:
+                y1 = 0; y2 = h
+            if y2 > img_h:
+                y2 = img_h; y1 = img_h - h
+        elif origin_rect is not None:
+            # align ORIGIN barcode along bottom edge, shifted 10% left to show more of left edge
+            x_center = origin_rect.left
+            x1 = int(x_center - w * 0.6)  # Shift left by using 0.6 instead of 0.5
+            x2 = x1 + w
+            y2 = origin_rect.top + origin_rect.height
+            y1 = y2 - h
+            if x1 < 0:
+                x1 = 0; x2 = w
+            if x2 > img_w:
+                x2 = img_w; x1 = img_w - w
+            if y1 < 0:
+                y1 = 0; y2 = h
+        elif pn_rect is not None:
+            # align PN barcode to top edge with horizontal centering and minimal padding
+            x_center = pn_rect.left + pn_rect.width // 2
+            x1 = int(x_center - w / 2)
+            x2 = x1 + w
+            y1 = max(0, pn_rect.top - 10)  # Just 10px top padding
+            y2 = y1 + h
+            if x1 < 0:
+                x1 = 0; x2 = w
+            if x2 > img_w:
+                x2 = img_w; x1 = img_w - w
+            if y2 > img_h:
+                y2 = img_h; y1 = max(0, img_h - h)
+            # Ensure y1 doesn't go below 0
+            if y1 < 0:
+                y1 = 0; y2 = h
+        elif sn_rect is not None:
+            # center SN barcode in crop
+            x_center = sn_rect.left + sn_rect.width // 2
+            y_center = sn_rect.top + sn_rect.height // 2
+            x1 = int(x_center - w / 2)
+            y1 = int(y_center - h / 2)
+            x2 = x1 + w
+            y2 = y1 + h
+            if x1 < 0:
+                x1 = 0; x2 = w
+            if x2 > img_w:
+                x2 = img_w; x1 = img_w - w
+            if y1 < 0:
+                y1 = 0; y2 = h
+            if y2 > img_h:
+                y2 = img_h; y1 = img_h - h
+        else:
+            # Fallback: center on union if no anchor barcode found
+            cx = (min_x + max_x) // 2
+            cy = (min_y + max_y) // 2
+            x1 = clamp(cx - w // 2, 0, img_w - w)
+            y1 = clamp(cy - h // 2, 0, img_h - h)
+            x2 = x1 + w
+            y2 = y1 + h
+        
+        # CRITICAL: Ensure ALL detected regions are fully included in crop (priority for multi-barcode)
+        # For multiple barcodes, expand/shift crop to include everything with margin
+        if not single_barcode:
+            margin = 20  # pixels
+            if min_x < x1 + margin:
+                # Regions extend left - adjust crop
+                needed = (x1 + margin) - min_x
+                x1 = max(0, x1 - needed)
+                x2 = min(img_w, x1 + w)
+            if max_x > x2 - margin:
+                # Regions extend right - adjust crop
+                needed = max_x - (x2 - margin)
+                x2 = min(img_w, x2 + needed)
+                x1 = max(0, x2 - w)
+            if min_y < y1 + margin:
+                # Regions extend above - adjust crop
+                needed = (y1 + margin) - min_y
+                y1 = max(0, y1 - needed)
+                y2 = min(img_h, y1 + h)
+            if max_y > y2 - margin:
+                # Regions extend below - adjust crop
+                needed = max_y - (y2 - margin)
+                y2 = min(img_h, y2 + needed)
+                y1 = max(0, y2 - h)
+        
+        x1 = int(clamp(x1, 0, img_w - 1)); x2 = int(clamp(x2, 1, img_w))
+        y1 = int(clamp(y1, 0, img_h - 1)); y2 = int(clamp(y2, 1, img_h))
+        crop = gray[y1:y2, x1:x2]
+        if crop.size == 0:
+            return found, union_images
+        zoom = cv2.resize(crop, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+        # Store union zoom in memory for potential OCR usage later
+        try:
+            union_images.append(zoom)
+        except Exception:
+            pass
+        
+        # Save zoom union image if debug mode enabled
+        if DEBUG_ZOOM_ROI and DEBUG_ZOOM_DIR and debug_name:
+            try:
+                zoom_path = os.path.join(DEBUG_ZOOM_DIR, f"{os.path.splitext(debug_name)[0]}_zoom_union.png")
+                cv2.imwrite(zoom_path, zoom)
+                print(f"[DEBUG] Saved zoom union crop: {os.path.basename(zoom_path)}")
+            except Exception as ex:
+                print(f"[DEBUG WARNING] Failed to save zoom union crop: {ex}")
+        
+        # Re-run the barcode scanner on the zoom-union crop (raw, Otsu, CLAHE)
+        for z in [zoom, cv2.threshold(zoom, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1], enhance_for_barcode_reading(zoom)]:
+            _collect(decode(Image.fromarray(z), symbols=[ZBarSymbol.CODE128]), record_regions=False)
+            if has_required_barcodes(found):
+                return found, union_images
+
+        # Also try small rotations on the zoom union image to handle slight tilt
+        if not has_required_barcodes(found):
+            base_variants = [
+                ("zoom", zoom),
+                ("zoom_enh", enhance_for_barcode_reading(zoom))
+            ]
+            for name, base in base_variants:
+                for ang in [7, -7, 14, -14, 21, -21]:
+                    h2, w2 = base.shape[:2]
+                    M2 = cv2.getRotationMatrix2D((w2 // 2, h2 // 2), ang, 1.0)
+                    rot = cv2.warpAffine(base, M2, (w2, h2), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+                    _collect(decode(Image.fromarray(rot), symbols=[ZBarSymbol.CODE128]), record_regions=False)
+                    if has_required_barcodes(found):
+                        return found, union_images
+                    # Try Otsu on rotated as well
+                    rot_bin = cv2.threshold(rot, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+                    _collect(decode(Image.fromarray(rot_bin), symbols=[ZBarSymbol.CODE128]), record_regions=False)
+                    if has_required_barcodes(found):
+                        return found, union_images
+    return found, union_images
 
 
 def correct_ocr_part_number(detected_part: str, expected_parts: list[str] | None):
@@ -373,52 +739,94 @@ def correct_ocr_serial_number(detected_serial: str) -> str | None:
     week = s[10:12]
     year = s[12:14]
     cy = datetime.now().year % 100
+    
+    # Track if we made any corrections
+    corrected = False
+
+    # Correct week digits - but only if year is already valid or will be made valid
     for i, ch in enumerate(week):
-        if 1 <= int(week) <= 52:
+        wk_int = int(week)
+        if 1 <= wk_int <= 52:
             break
         for d in '0123456789':
             if d == ch:
                 continue
             if ch in ocr.get(d, []) or d in ocr.get(ch, []):
-                test = (week[:i] + d + week[i+1:])
-                if 1 <= int(test) <= 52:
+                test_week = (week[:i] + d + week[i+1:])
+                test_wk_int = int(test_week)
+                if 1 <= test_wk_int <= 52:
                     chars[10 + i] = d
-                    week = test
+                    week = test_week
+                    corrected = True
                     print(f"       [CORRECTED SERIAL] S{s} → S{''.join(chars)} (week char {i}: {ch}→{d})")
                     break
+
+    # Correct year digits
     for i, ch in enumerate(year):
-        if 24 <= int(year) <= cy + 1:
+        yr_int = int(year)
+        if 24 <= yr_int <= cy:
             break
         for d in '0123456789':
             if d == ch:
                 continue
             if ch in ocr.get(d, []) or d in ocr.get(ch, []):
-                test = (year[:i] + d + year[i+1:])
-                if 24 <= int(test) <= cy + 1:
+                test_year = (year[:i] + d + year[i+1:])
+                test_yr_int = int(test_year)
+                if 24 <= test_yr_int <= cy:
                     chars[12 + i] = d
-                    year = test
+                    year = test_year
+                    corrected = True
                     print(f"       [CORRECTED SERIAL] S{s} → S{''.join(chars)} (year char {i}: {ch}→{d})")
                     break
-    corrected = 'S' + ''.join(chars)
-    return corrected if is_valid_serial_number(corrected) else None
+
+    if not corrected:
+        return None
+        
+    corrected_serial = 'S' + ''.join(chars)
+    # Ensure corrected serial passes full validation
+    if is_valid_serial_number(corrected_serial):
+        return corrected_serial
+    else:
+        return None
 
 
-def extract_text_with_ocr(pil_image: Image.Image, expected_parts: list[str] | None) -> list[str]:
-    """OCR fallback to find part and serial, trying minimal but effective variants."""
+def extract_text_with_ocr(pil_image: Image.Image, expected_parts: list[str] | None, preferred_images: list[Image.Image] | None = None) -> list[str]:
+    """OCR fallback to find part and serial.
+    Tries union crops (preferred_images) first, then the original if still missing P/S.
+    Each image is processed with CLAHE and Otsu variants, with PSM6 then PSM7 if needed.
+    """
     if not TESSERACT_AVAILABLE:
         return []
-    found = []
-    arr = np.array(pil_image)
-    gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY) if len(arr.shape) == 3 else arr
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    enhanced = clahe.apply(gray)
-    images = [enhanced, cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]]
+
+    def build_variants(img: Image.Image) -> list[np.ndarray]:
+        arr = np.array(img)
+        gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY) if len(arr.shape) == 3 else arr
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        enhanced_img = clahe.apply(gray)
+        otsu = cv2.threshold(enhanced_img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+        return [enhanced_img, otsu]
+
+    found: list[str] = []
+    candidates: list[np.ndarray] = []
+
+    # Prefer union crops first if provided
+    if preferred_images:
+        for pim in preferred_images:
+            try:
+                candidates.extend(build_variants(pim))
+            except Exception:
+                continue
+
+    # Finally add the original image variants
+    candidates.extend(build_variants(pil_image))
+
     psm_modes = [6]
-    for img in images:
+    for img in candidates:
         for psm in psm_modes:
             try:
                 text = pytesseract.image_to_string(Image.fromarray(img), config=f"--psm {psm} -c tessedit_char_whitelist=0123456789-")
                 s = text.replace(' ', '')
+                # Part numbers
                 for m in re.findall(r"\d{4}-?\d{5}", s):
                     norm = m if '-' in m else f"{m[:4]}-{m[4:]}"
                     if expected_parts:
@@ -429,6 +837,7 @@ def extract_text_with_ocr(pil_image: Image.Image, expected_parts: list[str] | No
                     P = f"P{norm}"
                     if P not in found and re.fullmatch(r"^P\d{4}-\d{5}$", P):
                         found.append(P)
+                # Serials
                 for m in re.findall(r"900\d{15}", s):
                     S = f"S{m}"
                     if S not in found and is_valid_serial_number(S):
@@ -476,12 +885,38 @@ def create_folder_structure(base: str, part: str | None, serial: str | None) -> 
     return target
 
 
-def process_image_ocr(image_path: str, expected_parts: list[str] | None):
+# Multiprocessing worker helpers - these set the global DEBUG_ZOOM_DIR in worker processes
+def _process_barcode_with_debug(args):
+    """Wrapper for multiprocessing that sets DEBUG_ZOOM_DIR in worker process."""
+    image_path, debug_dir = args
+    global DEBUG_ZOOM_DIR
+    DEBUG_ZOOM_DIR = debug_dir
+    return process_image_barcode_only(image_path)
+
+def _process_ocr_with_debug(args):
+    """Wrapper for multiprocessing that sets DEBUG_ZOOM_DIR in worker process."""
+    image_path, expected_parts, debug_dir, union_bytes = args
+    global DEBUG_ZOOM_DIR
+    DEBUG_ZOOM_DIR = debug_dir
+    return process_image_ocr(image_path, expected_parts, union_bytes)
+
+
+def process_image_ocr(image_path: str, expected_parts: list[str] | None, union_bytes: list[bytes] | None = None):
     start = datetime.now()
     try:
         pimg = Image.open(image_path)
         pimg = apply_exif_orientation(pimg)
-        ocr_codes = extract_text_with_ocr(pimg, expected_parts)
+        # Build preferred images from in-memory union crop bytes
+        preferred_images: list[Image.Image] | None = None
+        if union_bytes:
+            preferred_images = []
+            for b in union_bytes:
+                try:
+                    preferred_images.append(Image.open(io.BytesIO(b)))
+                except Exception:
+                    continue
+
+        ocr_codes = extract_text_with_ocr(pimg, expected_parts, preferred_images=preferred_images)
         return {
             'image_path': image_path,
             'ocr_codes': ocr_codes,
@@ -503,13 +938,25 @@ def process_image_barcode_only(image_path: str):
     try:
         pimg = Image.open(image_path)
         pimg = apply_exif_orientation(pimg)
-        all_codes = decode_barcodes(pimg)
+        # Optional debug: pass image name so ROI overlays can be saved if enabled
+        dbg_name = os.path.basename(image_path) if DEBUG_ZOOM_ROI else None
+        all_codes, union_imgs = decode_barcodes(pimg, debug_name=dbg_name)
         part, serial = extract_identifiers(all_codes)
+        # Encode union crops to PNG bytes for cross-process handoff
+        union_bytes: list[bytes] = []
+        try:
+            for z in union_imgs or []:
+                ok, buf = cv2.imencode('.png', z)
+                if ok:
+                    union_bytes.append(buf.tobytes())
+        except Exception:
+            pass
         return {
             'image_path': image_path,
             'part_number': part,
             'serial_number': serial,
             'all_barcodes': all_codes,
+            'union_crops': union_bytes,
             'success': True,
             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             'processing_time': (datetime.now() - start).total_seconds(),
@@ -529,7 +976,7 @@ def process_image_barcode_only(image_path: str):
 
 def generate_report(results: list[dict], out_dir: str, total_time: float | None):
     path = os.path.join(out_dir, "_sorting_report.txt")
-    with open(path, 'w') as f:
+    with open(path, 'w', encoding='utf-8') as f:
         f.write("=" * 80 + "\n")
         f.write("BARCODE SORTING REPORT\n")
         f.write(f"Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
@@ -641,7 +1088,7 @@ def main():
 
     # Input selection (or quick modes)
     Tk().withdraw()
-    parts, workers, mode = select_part_numbers_dialog(expected if expected else []) if expected else (None, (os.cpu_count() or 4), None)
+    parts, workers, mode = select_part_numbers_dialog(expected if expected else []) if expected else (None, max(1, int((os.cpu_count() or 4) * 0.5)), None)
     if expected:
         if mode == 'small_batch':
             run_small_batch_test(parts if parts else expected)
@@ -669,6 +1116,13 @@ def main():
         return
 
     out_dir = os.path.join(input_dir, "Sorted_Images"); os.makedirs(out_dir, exist_ok=True)
+    
+    # Set debug directory if debug mode is enabled
+    global DEBUG_ZOOM_DIR
+    if DEBUG_ZOOM_ROI:
+        DEBUG_ZOOM_DIR = os.path.join(out_dir, "_zoom_debug")
+        os.makedirs(DEBUG_ZOOM_DIR, exist_ok=True)
+        print(f"[DEBUG] Zoom ROI debug enabled. Images will be saved to: {DEBUG_ZOOM_DIR}")
 
     # Discover images
     exts = ('.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.tif')
@@ -684,7 +1138,7 @@ def main():
     executor = None
     try:
         executor = ProcessPoolExecutor(max_workers=max_workers)
-        fut2path = {executor.submit(process_image_barcode_only, p): p for p in files}
+        fut2path = {executor.submit(_process_barcode_with_debug, (p, DEBUG_ZOOM_DIR)): p for p in files}
         for fut in as_completed(fut2path):
             if interrupted:
                 print("\n[INFO] Stopping Pass 1 early…")
@@ -727,7 +1181,7 @@ def main():
         executor2 = None
         try:
             executor2 = ProcessPoolExecutor(max_workers=max_workers)
-            fut2path = {executor2.submit(process_image_ocr, r['image_path'], selected_parts): r['image_path'] for r in need_ocr}
+            fut2path = {executor2.submit(_process_ocr_with_debug, (r['image_path'], selected_parts, DEBUG_ZOOM_DIR, r.get('union_crops'))): r['image_path'] for r in need_ocr}
             for fut in as_completed(fut2path):
                 if interrupted:
                     print("\n[INFO] Stopping Pass 2 early…")
@@ -821,7 +1275,34 @@ def main():
             os.startfile(out_dir)
         except Exception:
             pass
-        messagebox.showinfo("Processing Complete", f"Processed {len(final)} images. Results saved to:\n{out_dir}")
+        
+        # Show completion dialog with auto-close after 30 seconds
+        root = Tk()
+        root.withdraw()
+        dialog = Toplevel(root)
+        dialog.title("Processing Complete")
+        dialog.geometry("450x180")
+        dialog.resizable(False, False)
+        
+        # Center the dialog
+        dialog.update_idletasks()
+        x = (dialog.winfo_screenwidth() // 2) - (dialog.winfo_width() // 2)
+        y = (dialog.winfo_screenheight() // 2) - (dialog.winfo_height() // 2)
+        dialog.geometry(f"{dialog.winfo_width()}x{dialog.winfo_height()}+{x}+{y}")
+        
+        msg = f"Processed {len(final)} images.\n\nResults saved to:\n{out_dir}\n\n(Auto-closing in 30 seconds...)"
+        Label(dialog, text=msg, wraplength=400, justify="left", padx=20, pady=20).pack(expand=True)
+        
+        def close_dialog():
+            dialog.destroy()
+            root.quit()
+            root.destroy()
+        
+        Button(dialog, text="OK", command=close_dialog, width=10, bg="#4CAF50", fg="white").pack(pady=(0, 15))
+        
+        # Auto-close after 30 seconds
+        dialog.after(30000, close_dialog)
+        dialog.mainloop()
     else:
         # On interrupt, exit immediately after writing report to free the terminal faster
         print("[INFO] Exiting immediately due to Ctrl+C (report already written).")
