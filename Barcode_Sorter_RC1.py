@@ -276,6 +276,7 @@ def decode_barcodes(pil_image, debug_name: str | None = None):
     
     found = []
     union_images: list[np.ndarray] = []  # in-memory zoom-union crops (grayscale, 8-bit)
+    best_rotation_img: np.ndarray | None = None  # Best rotated image based on barcode count
     regions = []
     barcodes = []  # list of tuples (data, rect, polygon_points)
     arr = np.array(pil_image)
@@ -448,23 +449,52 @@ def decode_barcodes(pil_image, debug_name: str | None = None):
 
     # Rotation retries if we found barcodes but missing P/S
     if not has_required_barcodes(found) and found:
-        # Try rotating ±7°, ±14°, ±21° to handle tilted labels
-        for angle in [7, -7, 14, -14, 21, -21]:
+        # Try rotating ±14°, ±28°, ±42° to handle tilted labels (ZBar reads ±7° from each)
+        # Track which rotation finds the most barcodes
+        max_barcode_count = len(found)
+        best_rotation_angle = 0  # 0 means original image
+        
+        for angle in [14, -14, 28, -28, 42, -42]:
             h, w = arr.shape[:2]
             center = (w // 2, h // 2)
             M = cv2.getRotationMatrix2D(center, angle, 1.0)
             rotated = cv2.warpAffine(arr, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
             rotated_pil = Image.fromarray(rotated)
             M_inv = cv2.invertAffineTransform(M)
+            
+            # Track count before rotation
+            count_before = len(found)
             _collect(decode(rotated_pil, symbols=[ZBarSymbol.CODE128]), M_inv=M_inv, record_regions=True)
+            count_after = len(found)
+            
+            # Update best rotation if this one found more barcodes
+            if count_after > max_barcode_count:
+                max_barcode_count = count_after
+                best_rotation_angle = angle
+                best_rotation_img = cv2.cvtColor(rotated, cv2.COLOR_RGB2GRAY) if len(rotated.shape) == 3 else rotated
+            
             if has_required_barcodes(found):
                 return found, union_images
             # Try enhanced version too
             rotated_gray = cv2.cvtColor(rotated, cv2.COLOR_RGB2GRAY) if len(rotated.shape) == 3 else rotated
             rotated_enh = enhance_for_barcode_reading(rotated)
+            
+            count_before_enh = len(found)
             _collect(decode(Image.fromarray(rotated_enh), symbols=[ZBarSymbol.CODE128]), M_inv=M_inv, record_regions=True)
+            count_after_enh = len(found)
+            
+            # Check enhanced version too for best rotation
+            if count_after_enh > max_barcode_count:
+                max_barcode_count = count_after_enh
+                best_rotation_angle = angle
+                best_rotation_img = rotated_enh
+            
             if has_required_barcodes(found):
                 return found, union_images
+        
+        # Log best rotation found
+        if best_rotation_angle != 0 and DEBUG_ZOOM_ROI and debug_name:
+            print(f"[DEBUG] Best rotation: {best_rotation_angle}° ({max_barcode_count} barcodes)")
 
     # Save debug overlay before zoom attempts (only if P/S not found yet)
     if DEBUG_ZOOM_ROI and debug_name:
@@ -653,7 +683,10 @@ def decode_barcodes(pil_image, debug_name: str | None = None):
         
         x1 = int(clamp(x1, 0, img_w - 1)); x2 = int(clamp(x2, 1, img_w))
         y1 = int(clamp(y1, 0, img_h - 1)); y2 = int(clamp(y2, 1, img_h))
-        crop = gray[y1:y2, x1:x2]
+        
+        # Use best rotation image if available, otherwise use original gray
+        source_gray = best_rotation_img if best_rotation_img is not None else gray
+        crop = source_gray[y1:y2, x1:x2]
         if crop.size == 0:
             return found, union_images
         zoom = cv2.resize(crop, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
@@ -685,7 +718,7 @@ def decode_barcodes(pil_image, debug_name: str | None = None):
                 ("zoom_enh", enhance_for_barcode_reading(zoom))
             ]
             for name, base in base_variants:
-                for ang in [7, -7, 14, -14, 21, -21]:
+                for ang in [14, -14, 28, -28, 42, -42]:
                     h2, w2 = base.shape[:2]
                     M2 = cv2.getRotationMatrix2D((w2 // 2, h2 // 2), ang, 1.0)
                     rot = cv2.warpAffine(base, M2, (w2, h2), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
