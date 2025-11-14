@@ -567,17 +567,33 @@ def decode_barcodes(pil_image, debug_name: str | None = None):
         # Minimum dimensions: 750px wide x 500px tall
         w = max(750, int((base_w + 2 * pad_w) * 1.15))
         h = max(500, int((base_h + 2 * pad_h) * 1.15))
+        
+        # Try to maintain 3:2 aspect ratio, but don't force it if image boundaries prevent it
+        target_aspect = 3.0 / 2.0
         if w / max(1, h) < target_aspect:
-            w = int(h * target_aspect)
+            # Would need to expand width
+            ideal_w = int(h * target_aspect)
+            # Only expand if we have room in the image
+            if ideal_w <= img_w:
+                w = ideal_w
         else:
-            h = int(w / target_aspect)
-        # Ensure minimums are still met after aspect ratio adjustment
-        if w < 750:
+            # Would need to expand height
+            ideal_h = int(w / target_aspect)
+            # Only expand if we have room in the image
+            if ideal_h <= img_h:
+                h = ideal_h
+        
+        # Ensure minimums are still met after aspect ratio adjustment (but respect image bounds)
+        if w < 750 and img_w >= 750:
             w = 750
-            h = int(w / target_aspect)
-        if h < 500:
+            ideal_h = int(w / target_aspect)
+            if ideal_h <= img_h:
+                h = ideal_h
+        if h < 500 and img_h >= 500:
             h = 500
-            w = int(h * target_aspect)
+            ideal_w = int(h * target_aspect)
+            if ideal_w <= img_w:
+                w = ideal_w
 
         def clamp(val, lo, hi):
             return max(lo, min(hi, val))
@@ -784,10 +800,12 @@ def correct_ocr_serial_number(detected_serial: str) -> str | None:
     # Track if we made any corrections
     corrected = False
 
-    # Correct week digits - but only if year is already valid or will be made valid
+    # Correct week digits
+    week_valid = False
     for i, ch in enumerate(week):
         wk_int = int(week)
         if 1 <= wk_int <= 52:
+            week_valid = True
             break
         for d in '0123456789':
             if d == ch:
@@ -798,14 +816,19 @@ def correct_ocr_serial_number(detected_serial: str) -> str | None:
                 if 1 <= test_wk_int <= 52:
                     chars[10 + i] = d
                     week = test_week
+                    week_valid = True
                     corrected = True
                     print(f"       [CORRECTED SERIAL] S{s} → S{''.join(chars)} (week char {i}: {ch}→{d})")
                     break
+        if week_valid:
+            break
 
     # Correct year digits
+    year_valid = False
     for i, ch in enumerate(year):
         yr_int = int(year)
         if 24 <= yr_int <= cy:
+            year_valid = True
             break
         for d in '0123456789':
             if d == ch:
@@ -816,15 +839,18 @@ def correct_ocr_serial_number(detected_serial: str) -> str | None:
                 if 24 <= test_yr_int <= cy:
                     chars[12 + i] = d
                     year = test_year
+                    year_valid = True
                     corrected = True
                     print(f"       [CORRECTED SERIAL] S{s} → S{''.join(chars)} (year char {i}: {ch}→{d})")
                     break
+        if year_valid:
+            break
 
     if not corrected:
         return None
         
     corrected_serial = 'S' + ''.join(chars)
-    # Ensure corrected serial passes full validation
+    # Ensure corrected serial passes full validation (both week AND year must be valid)
     if is_valid_serial_number(corrected_serial):
         return corrected_serial
     else:
