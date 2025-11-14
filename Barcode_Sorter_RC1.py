@@ -495,6 +495,14 @@ def decode_barcodes(pil_image, debug_name: str | None = None):
         # Log best rotation found
         if best_rotation_angle != 0 and DEBUG_ZOOM_ROI and debug_name:
             print(f"[DEBUG] Best rotation: {best_rotation_angle}° ({max_barcode_count} barcodes)")
+            # Save best rotation image
+            if DEBUG_ZOOM_DIR and best_rotation_img is not None:
+                try:
+                    rotation_path = os.path.join(DEBUG_ZOOM_DIR, f"{os.path.splitext(debug_name)[0]}_best_rotation_{best_rotation_angle}deg.png")
+                    cv2.imwrite(rotation_path, best_rotation_img)
+                    print(f"[DEBUG] Saved best rotation image: {os.path.basename(rotation_path)}")
+                except Exception as ex:
+                    print(f"[DEBUG WARNING] Failed to save best rotation image: {ex}")
 
     # Save debug overlay before zoom attempts (only if P/S not found yet)
     if DEBUG_ZOOM_ROI and debug_name:
