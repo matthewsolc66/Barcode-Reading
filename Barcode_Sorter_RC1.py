@@ -508,6 +508,8 @@ def decode_barcodes(pil_image, debug_name: str | None = None):
     if DEBUG_ZOOM_ROI and debug_name:
         if regions:
             _save_debug_overlay()
+            # Log what we found for diagnostics
+            print(f"[DEBUG] {debug_name}: Found {len(found)} barcodes: {found}")
         else:
             print(f"[DEBUG] {debug_name}: No barcode regions detected in initial passes")
 
@@ -565,8 +567,9 @@ def decode_barcodes(pil_image, debug_name: str | None = None):
 
         # Compute target w/h based on chosen union plus padding, adjusted to 3:2
         # Minimum dimensions: 750px wide x 500px tall
+        # Increased vertical expansion to capture more label area (especially top PN/SN barcodes)
         w = max(750, int((base_w + 2 * pad_w) * 1.15))
-        h = max(500, int((base_h + 2 * pad_h) * 1.15))
+        h = max(500, int((base_h + 2 * pad_h) * 1.4))
         
         # Try to maintain 3:2 aspect ratio, but don't force it if image boundaries prevent it
         target_aspect = 3.0 / 2.0
@@ -875,6 +878,9 @@ def extract_text_with_ocr(pil_image: Image.Image, expected_parts: list[str] | No
 
     found: list[str] = []
     candidates: list[np.ndarray] = []
+    # Keep raw OCR outputs from every attempt so we can post-scan them for
+    # part numbers and serials (useful when OCR returns noisy, merged digit runs)
+    raw_texts: list[str] = []
 
     # Prefer union crops first if provided
     if preferred_images:
@@ -892,6 +898,8 @@ def extract_text_with_ocr(pil_image: Image.Image, expected_parts: list[str] | No
         for psm in psm_modes:
             try:
                 text = pytesseract.image_to_string(Image.fromarray(img), config=f"--psm {psm} -c tessedit_char_whitelist=0123456789-")
+                # Save raw OCR output for later global scanning
+                raw_texts.append(text)
                 s = text.replace(' ', '')
                 # Part numbers
                 for m in re.findall(r"\d{4}-?\d{5}", s):
@@ -904,7 +912,7 @@ def extract_text_with_ocr(pil_image: Image.Image, expected_parts: list[str] | No
                     P = f"P{norm}"
                     if P not in found and re.fullmatch(r"^P\d{4}-\d{5}$", P):
                         found.append(P)
-                # Serials
+                # Serials - primary search for clean 900... matches
                 for m in re.findall(r"900\d{15}", s):
                     S = f"S{m}"
                     if S not in found and is_valid_serial_number(S):
@@ -913,12 +921,70 @@ def extract_text_with_ocr(pil_image: Image.Image, expected_parts: list[str] | No
                         corr = correct_ocr_serial_number(S)
                         if corr and corr not in found:
                             found.append(corr)
+
+                # Fallback: sometimes OCR returns a long run of digits with extra
+                # leading/trailing noise (e.g. '5900016795208258029'). Search for
+                # long digit runs and extract a valid '900' substring if present.
+                for long_digits in re.findall(r"\d{18,24}", s):
+                    sub = re.search(r"900\d{15}", long_digits)
+                    if sub:
+                        m = sub.group(0)
+                        S = f"S{m}"
+                        if S not in found and is_valid_serial_number(S):
+                            found.append(S)
+                        elif S not in found:
+                            corr = correct_ocr_serial_number(S)
+                            if corr and corr not in found:
+                                found.append(corr)
                 if has_required_barcodes(found):
                     return found
             except Exception:
                 continue
         if not any(c.startswith('S') for c in found) and 7 not in psm_modes:
             psm_modes.append(7)
+    # Post-scan all raw OCR outputs for PN/SN. This helps catch cases where OCR
+    # produced noisy or merged digit runs in some variants but not others.
+    for raw in raw_texts:
+        try:
+            s = (raw or '').replace(' ', '')
+        except Exception:
+            s = ''
+
+        # Part numbers
+        for m in re.findall(r"\d{4}-?\d{5}", s):
+            norm = m if '-' in m else f"{m[:4]}-{m[4:]}"
+            if expected_parts:
+                corr = correct_ocr_part_number(norm, expected_parts)
+                if not corr:
+                    continue
+                norm = corr
+            P = f"P{norm}"
+            if P not in found and re.fullmatch(r"^P\d{4}-\d{5}$", P):
+                found.append(P)
+
+        # Clean serial matches
+        for m in re.findall(r"900\d{15}", s):
+            S = f"S{m}"
+            if S not in found and is_valid_serial_number(S):
+                found.append(S)
+            elif S not in found:
+                corr = correct_ocr_serial_number(S)
+                if corr and corr not in found:
+                    found.append(corr)
+
+        # Fallback: long digit runs containing the 900... substring
+        for long_digits in re.findall(r"\d{18,24}", s):
+            sub = re.search(r"900\d{15}", long_digits)
+            if sub:
+                m = sub.group(0)
+                S = f"S{m}"
+                if S not in found and is_valid_serial_number(S):
+                    found.append(S)
+                elif S not in found:
+                    corr = correct_ocr_serial_number(S)
+                    if corr and corr not in found:
+                        found.append(corr)
+
     return found
 
 
