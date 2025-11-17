@@ -1,0 +1,6 @@
+Pillow
+pyzbar
+opencv-python
+numpy
+pytesseract
+psutil

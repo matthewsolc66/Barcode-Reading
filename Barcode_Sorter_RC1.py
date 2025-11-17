@@ -34,7 +34,17 @@ from tkinter import (
     Label, Frame, Scale, HORIZONTAL, Canvas, Scrollbar, VERTICAL
 )
 from PIL import Image, ImageOps
-from pyzbar.pyzbar import decode, ZBarSymbol
+try:
+    from pyzbar.pyzbar import decode, ZBarSymbol
+except Exception as e:
+    # Friendly error for common Windows DLL/runtime issues (VC++ redistributable)
+    sys.stderr.write("[ERROR] Failed to import 'pyzbar' (barcode reader library).\n")
+    sys.stderr.write("This often means the Microsoft Visual C++ Redistributable (x64) is missing.\n")
+    sys.stderr.write("Please install it from:\n")
+    sys.stderr.write("  https://www.microsoft.com/en-us/download/details.aspx?id=40784&msockid=2027dabdab8d696a3192ccf8aa2068d3\n")
+    sys.stderr.write("If you already installed it, try restarting your machine.\n")
+    sys.stderr.write(f"Original import error: {e}\n")
+    sys.exit(1)
 import cv2
 import numpy as np
 import psutil
@@ -767,9 +777,18 @@ def correct_ocr_part_number(detected_part: str, expected_parts: list[str] | None
     x = detected_part[1:] if detected_part.startswith('P') else detected_part
     if x in expected_parts:
         return x
+    # Expanded OCR confusion matrix with common visual substitutions
     ocr = {
-        '0': ['8', 'O'], '1': ['7', 'I'], '2': ['Z'], '3': ['8'], '4': ['A'],
-        '5': ['S'], '6': ['8', '5'], '7': ['1'], '8': ['0', '3', '6', 'B'], '9': ['8']
+        '0': ['8', 'O', 'o', 'Q', 'D'],
+        '1': ['7', 'I', 'i', 'l', '|', '!'],
+        '2': ['Z', 'z'],
+        '3': ['8', 'B'],
+        '4': ['A', 'a'],
+        '5': ['S', 's'],
+        '6': ['8', '5', 'G', 'b', '°'],  # degree symbol often confused with 6
+        '7': ['1', 'T', 't'],
+        '8': ['0', '3', '6', 'B', 'b'],
+        '9': ['8', 'g', 'q']
     }
     best, min_err = None, 1e9
     for exp in expected_parts:
@@ -791,9 +810,18 @@ def correct_ocr_serial_number(detected_serial: str) -> str | None:
     s = detected_serial[1:] if detected_serial.startswith('S') else detected_serial
     if not (s.startswith('900') and len(s) == 18):
         return None
+    # Expanded OCR confusion matrix with common visual substitutions
     ocr = {
-        '0': ['8', 'O'], '1': ['7', 'I'], '2': ['Z'], '3': ['8'], '4': ['A'],
-        '5': ['S'], '6': ['8', '5'], '7': ['1'], '8': ['0', '3', '6', 'B'], '9': ['8']
+        '0': ['8', 'O', 'o', 'Q', 'D'],
+        '1': ['7', 'I', 'i', 'l', '|', '!'],
+        '2': ['Z', 'z'],
+        '3': ['8', 'B'],
+        '4': ['A', 'a'],
+        '5': ['S', 's'],
+        '6': ['8', '5', 'G', 'b', '°'],  # degree symbol often confused with 6
+        '7': ['1', 'T', 't'],
+        '8': ['0', '3', '6', 'B', 'b'],
+        '9': ['8', 'g', 'q']
     }
     chars = list(s)
     week = s[10:12]
@@ -860,6 +888,29 @@ def correct_ocr_serial_number(detected_serial: str) -> str | None:
         return None
 
 
+def clean_ocr_text_aggressive(text: str) -> str:
+    """Aggressively clean OCR text by replacing common symbol->digit confusions.
+    This normalizes text BEFORE pattern matching to catch more variations.
+    """
+    # Replace common OCR symbol mistakes with their digit equivalents
+    replacements = {
+        '\u00b0': '6',  # degree symbol → 6
+        'O': '0', 'o': '0', 'Q': '0', 'D': '0',  # O variations → 0
+        'I': '1', 'i': '1', 'l': '1', '|': '1', '!': '1',  # I variations → 1
+        'Z': '2', 'z': '2',  # Z → 2
+        'B': '8', 'b': '8',  # B → 8 (also could be 3 or 6, but 8 most common)
+        'S': '5', 's': '5',  # S → 5
+        'G': '6', 'g': '9',  # G → 6, g → 9
+        'T': '7', 't': '7',  # T → 7
+        'A': '4', 'a': '4',  # A → 4
+        'q': '9',  # q → 9
+    }
+    cleaned = text
+    for old, new in replacements.items():
+        cleaned = cleaned.replace(old, new)
+    return cleaned
+
+
 def extract_text_with_ocr(pil_image: Image.Image, expected_parts: list[str] | None, preferred_images: list[Image.Image] | None = None) -> list[str]:
     """OCR fallback to find part and serial.
     Tries union crops (preferred_images) first, then the original if still missing P/S.
@@ -897,10 +948,16 @@ def extract_text_with_ocr(pil_image: Image.Image, expected_parts: list[str] | No
     for img in candidates:
         for psm in psm_modes:
             try:
-                text = pytesseract.image_to_string(Image.fromarray(img), config=f"--psm {psm} -c tessedit_char_whitelist=0123456789-")
+                # Allow all alphanumeric characters so OCR can report letter/digit confusions (O vs 0, etc)
+                # Our fuzzy correction will handle cleaning up the results
+                text = pytesseract.image_to_string(Image.fromarray(img), config=f"--psm {psm}")
                 # Save raw OCR output for later global scanning
                 raw_texts.append(text)
-                s = text.replace(' ', '')
+                
+                # Clean text aggressively (replace common symbol->digit confusions)
+                cleaned = clean_ocr_text_aggressive(text)
+                s = cleaned.replace(' ', '')
+                
                 # Part numbers
                 for m in re.findall(r"\d{4}-?\d{5}", s):
                     norm = m if '-' in m else f"{m[:4]}-{m[4:]}"
@@ -946,7 +1003,9 @@ def extract_text_with_ocr(pil_image: Image.Image, expected_parts: list[str] | No
     # produced noisy or merged digit runs in some variants but not others.
     for raw in raw_texts:
         try:
-            s = (raw or '').replace(' ', '')
+            # Apply aggressive cleaning to raw text
+            cleaned = clean_ocr_text_aggressive(raw or '')
+            s = cleaned.replace(' ', '')
         except Exception:
             s = ''
 
