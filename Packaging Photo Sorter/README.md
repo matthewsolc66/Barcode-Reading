@@ -55,8 +55,6 @@ python .\Barcode_Sorter_RC1.py
 - `part_numbers_config.txt` — optional whitelist of expected part numbers
 
 ## Troubleshooting
-If none of these resolve the issue, please create an issue at https://github.com/matthewsolc66/Barcode-Reading and the developer will try to help as soon as possible.
-
  
 - If you see an import error for `pyzbar` mentioning `MSVCP*.dll` or `VCRUNTIME*.dll`:
   - Install the Microsoft Visual C++ Redistributable (x64) (link above) and reboot.
@@ -67,7 +65,8 @@ If none of these resolve the issue, please create an issue at https://github.com
 - If package installation fails during `setup_windows.bat`:
   - Try running the script as an administrator, or open a PowerShell prompt with admin rights and rerun the `pip install` line manually.
 
- 
+If none of these resolve the issue, please create an issue at https://github.com/matthewsolc66/Barcode-Reading and the developer will try to help as soon as possible.
+
 ## Workflow Diagram
 
 ```mermaid
