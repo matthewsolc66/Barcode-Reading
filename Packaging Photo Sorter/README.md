@@ -54,6 +54,23 @@ python .\Barcode_Sorter_RC1.py
 - `ocr_region_tester.py` – interactive OCR crop tester
 - `part_numbers_config.txt` – optional known part list
 
+## Photo Capture Best Practices
+
+For best barcode detection results:
+
+**Camera Angle (Critical)**
+- Position camera perpendicular (90°) to the label surface
+- Avoid angled shots which distort barcode lines
+
+![Correct: Perpendicular Angle](images/correct_angle.png)
+![Incorrect: Angled Shot](images/incorrect_angle.png)
+
+**General Guidelines**
+- Ensure label is fully visible and in frame
+- Avoid blur (hold steady or increase lighting)
+- Adequate lighting (no harsh shadows or glare)
+- Label should fill reasonable portion of frame
+
 ## Troubleshooting
 - Barcode import error (`pyzbar` / missing DLL): reinstall VC++ runtime and reboot if needed.
 - No OCR output: install Tesseract-OCR (UB Mannheim build) and ensure `tesseract.exe` on PATH — download:
