@@ -78,20 +78,6 @@ Initial public/stable release of the Windows-only Barcode & OCR Sorter. Automate
 Open an issue at: https://github.com/matthewsolc66/Barcode-Reading/issues
 Please attach sample images (if permissible) and a brief description of the failure mode.
 
-## Checks Prior to Tagging
-- Confirm `DEBUG` flag set to False in `Barcode_Sorter_RC1.py` distribution build.
-- Confirm `.venv` excluded from ZIP.
-- Test a fresh setup on a clean Windows VM (optional but recommended).
-
-## Tag & Release Instructions (Reference)
-```powershell
-# Create and push tag
-git tag -a v1.0.0 -m "Barcode Sorter v1.0.0 initial release"
-git push origin v1.0.0
-
-# (Optional) Regenerate ZIP if changes occurred after last archive
-Compress-Archive -Path .\Barcode_Sorter_RC1.py, .\run_sorter.bat, .\setup_windows.bat, .\requirements.txt, .\ocr_region_tester.py, .\part_numbers_config.txt, .\README.md, .\images -DestinationPath "Packaging Photo Sorter.zip" -Force
-```
 
 ## Final Note
 Thank you for using Barcode Sorter v1.0.0. Early feedback is invaluable—please report successes, failures, and suggestions.
