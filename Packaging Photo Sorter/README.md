@@ -72,9 +72,4 @@ python .\Barcode_Sorter_RC1.py
 3. After setup, they can double-click `run_sorter.bat` to run the sorter and pick the input folder.
 
 ---
-
-If you want, I can also:
-- Create a short `README_WINDOWS.txt` one-page quick-start to hand to teammates.
-- Add a PowerShell `run_sorter.ps1` that handles execution-policy bypass and nicer messages.
-
-Which (if any) would you like next?
+ 
