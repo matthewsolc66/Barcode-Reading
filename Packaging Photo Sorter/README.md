@@ -6,7 +6,8 @@ Organizes photos automatically by extracting Part Numbers (pattern `P####-#####`
 - Visual C++ Redistributable (x64) — required for `pyzbar` barcode decoding:
   https://www.microsoft.com/en-us/download/details.aspx?id=40784
 - Python 3.12+ (64-bit)
-- Optional: Tesseract-OCR (improves salvage when barcode data is incomplete)
+- Optional: Tesseract-OCR (improves salvage when barcode data is incomplete):
+  https://github.com/UB-Mannheim/tesseract/wiki
 
 ## First-Time Setup (Windows)
 1. Install the VC++ runtime (link above).
@@ -45,13 +46,6 @@ python .\Barcode_Sorter_RC1.py
 - `ocr_region_tester.py`: tuning tool for OCR extraction (not needed for normal use).
 - Debug crops can be enabled in the script if you toggle the internal debug flag (kept off by default in distribution for cleanliness).
 
-## Recommended Images (Placeholders)
-Add an `images/` folder and capture:
-- Folder selection dialog – `![Select Folder](images/select_dialog.png)`
-- Barcode enhancement before/after – `![Barcode Pass Compare](images/barcode_pass_compare.png)`
-- Sorted output tree – `![Sorted Structure](images/sorted_structure.png)`
-- Report snippet – `![Report Summary](images/report_summary.png)`
-
 ## Useful Files
 - `Barcode_Sorter_RC1.py` – main logic (barcode passes, OCR fallback, organization)
 - `setup_windows.bat` – environment + dependency setup
@@ -62,7 +56,8 @@ Add an `images/` folder and capture:
 
 ## Troubleshooting
 - Barcode import error (`pyzbar` / missing DLL): reinstall VC++ runtime and reboot if needed.
-- No OCR output: install Tesseract-OCR (UB Mannheim build) and ensure `tesseract.exe` on PATH.
+- No OCR output: install Tesseract-OCR (UB Mannheim build) and ensure `tesseract.exe` on PATH — download:
+  https://github.com/UB-Mannheim/tesseract/wiki
 - Install failures in setup: rerun as Administrator or manually run the printed `pip install` line.
 
 If none of these resolve the issue, please create an issue at https://github.com/matthewsolc66/Barcode-Reading and the developer will try to help as soon as possible.
@@ -78,7 +73,7 @@ flowchart TD
     SEL_DIALOG -->|Normal| FOLDER[User selects input image folder]
     FOLDER --> FIND_FILES[Find all images in folder]
     FIND_FILES --> PASS1["Pass 1: Scan barcodes in images<br/>(parallel, with retries/rotations)<br/>"]
-    PASS1 --> CHECK_PASS2{Images missing\n part/serial?}
+    PASS1 --> CHECK_PASS2{Images missing part/serial?}
     CHECK_PASS2 -->|Yes| PASS2["Pass 2: OCR fallback<br/>(parallel, CLAHE/Otsu/PSMs/union crops)"]
     CHECK_PASS2 -->|No| PASS3["Pass 3: Organize/copy images by Part/Serial"]
     PASS2 --> PASS3
