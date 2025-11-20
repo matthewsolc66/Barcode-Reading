@@ -65,11 +65,25 @@ python .\Barcode_Sorter_RC1.py
 - If package installation fails during `setup_windows.bat`:
   - Try running the script as an administrator, or open a PowerShell prompt with admin rights and rerun the `pip install` line manually.
 
-## Handoff suggestions for non-technical users
-
-1. Ask them to install the Visual C++ runtime first (link in this README).
-2. Send them this project folder and have them double-click `setup_windows.bat`.
-3. After setup, they can double-click `run_sorter.bat` to run the sorter and pick the input folder.
-
----
  
+## Workflow Diagram
+
+```mermaid
+flowchart TD
+  ST([Start Script]) --> INIT[Initialize: imports, config, GUI, handlers]
+  INIT --> LOAD_PARTS[Load expected part numbers - optional]
+  LOAD_PARTS --> SEL_DIALOG[Show dialog: Select parts, workers, quick modes]
+  SEL_DIALOG -->|Quick: Small Batch| SMALL_BATCH[Run small batch test] --> END
+  SEL_DIALOG -->|Quick: OCR Tester| OCR_TESTER[Launch OCR region tester] --> END
+  SEL_DIALOG -->|Normal| FOLDER[User selects input image folder]
+  FOLDER --> FIND_FILES[Find all images in folder]
+  FIND_FILES --> PASS1["Pass 1: Scan barcodes in images<br/>(parallel, with retries/rotations)<br/>"]
+  PASS1 --> CHECK_PASS2{Images missing\n part/serial?}
+  CHECK_PASS2 -->|Yes| PASS2["Pass 2: OCR fallback<br/>(parallel, CLAHE/Otsu/PSMs/union crops)"]
+  CHECK_PASS2 -->|No| PASS3["Pass 3: Organize/copy images by Part/Serial"]
+  PASS2 --> PASS3
+  PASS3 --> REPORT["Generate concise report"]
+  REPORT --> OPEN_FOLDER["Show output folder, completion dialog"]
+  OPEN_FOLDER --> END([End])
+```
+
