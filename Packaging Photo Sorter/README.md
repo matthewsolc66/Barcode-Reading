@@ -2,7 +2,7 @@
 
 Organizes photos automatically by extracting Part Numbers (pattern `P####-#####`) and Serial Numbers (`S900` + 15 digits) from barcodes. Falls back to OCR if barcodes are weak.
 
-**Getting Started:** Download `Packaging Photo Sorter.zip` from the repository and extract it to wherever you want to keep the script files.
+**Getting Started:** Download `Packaging Photo Sorter.zip` from the [latest release](https://github.com/matthewsolc66/Barcode-Reading/releases/download/v1.0.0/Packaging%20Photo%20Sorter.zip) and extract it to wherever you want to keep the script files.
 
 ## What You Need
 - Visual C++ Redistributable (x64) — required for `pyzbar` barcode decoding:
