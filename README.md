@@ -8,7 +8,7 @@ Organizes photos automatically by extracting Part Numbers (pattern `P####-#####`
 - Visual C++ Redistributable (x64) — required for `pyzbar` barcode decoding:
   https://www.microsoft.com/en-us/download/details.aspx?id=40784
 - Python 3.12+ (64-bit)
-- Optional: Tesseract-OCR (improves salvage when barcode data is incomplete):
+- Tesseract-OCR (improves salvage when barcode data is incomplete):
   https://github.com/UB-Mannheim/tesseract/wiki
 
 ## First-Time Setup (Windows)
@@ -40,12 +40,11 @@ python .\Barcode_Sorter_RC1.py
 6. OCR Cleaning: normalizes noisy characters (O→0, I→1, etc.), applies regex extraction for part/serial patterns.
 7. Validation: ensures part format `P####-#####`; serial prefix `S900` + 15 digits (week/year sanity checks may be applied internally).
 8. Output: creates `Sorted_Images/<Part>/<Serial>/` and copies images there.
-9. Report: summary file lists totals and any unresolved images (if implemented).
+9. Report: summary file lists totals and any unresolved images.
 10. Completion: final counts shown; window pauses (batch mode) so you can read results.
 
 ## Optional Configuration
 - `part_numbers_config.txt`: one part number per line to reinforce recognition.
-- `ocr_region_tester.py`: tuning tool for OCR extraction (not needed for normal use).
 - Debug crops can be enabled in the script if you toggle the internal debug flag (kept off by default in distribution for cleanliness).
 
 ## Useful Files
